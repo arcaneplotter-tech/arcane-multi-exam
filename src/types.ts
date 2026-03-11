@@ -35,16 +35,7 @@ export type Question = {
 };
 
 export type PowerUpType = 
-  // Offensive
-  | 'BLINDING_BLAST' | 'ANSWER_ERASER' | 'TIME_FREEZE' | 'MIRROR_MIND' | 'GRAVITY_SWITCH' | 'SABOTAGE' | 'CONFUSION_CLOUD' | 'ANSWER_LOCK'
-  // Defensive
-  | 'CLARITY' | 'FORCE_FIELD' | 'TIME_WARP' | 'SECOND_CHANCE' | 'REVENGE' | 'STEALTH_MODE' | 'MAGNET_SHIELD'
-  // Utility
-  | 'XRAY_VISION' | 'MIND_READER' | 'CHAOS_DUPLICATOR' | 'SCORE_SWAP' | 'QUANTUM_UNCERTAINTY' | 'TIME_BOMB' | 'PHANTOM_ANSWERS'
-  // Team
-  | 'CHAIN_REACTION' | 'SACRIFICE' | 'TELEPATHY' | 'MASS_REVIVE'
-  // Legacy/Existing
-  | 'SCISSORS' | 'LIGHTNING' | 'FIREBALL' | 'TORNADO' | 'SHIELD' | 'FREEZE' | 'DOUBLE_POINTS' | 'THIEF' | 'BOMB' | 'CLUE' | 'REVEAL' | 'MAGNET' | 'SHUFFLE' | 'BLACKOUT' | 'POISON' | 'VAMPIRE' | 'GRAVITY' | 'INVERT' | 'METEOR' | 'HAMMER';
+  | 'LIGHTNING' | 'FIREBALL' | 'DOUBLE_POINTS' | 'INVERT' | 'METEOR';
 
 export type PowerUp = {
   id: string;
@@ -53,7 +44,7 @@ export type PowerUp = {
 
 export type ActiveEffect = {
   type: PowerUpType;
-  endTime: number;
+  questionIndex: number;
 };
 
 export type Player = {
@@ -91,6 +82,6 @@ export type MessageType =
   | { type: 'CHAT_MESSAGE'; message: ChatMessage }
   | { type: 'GIVE_POWER_UP'; powerUp: PowerUp }
   | { type: 'USE_POWER_UP'; powerUpId: string; targetId: string }
-  | { type: 'APPLY_EFFECT'; effect: PowerUpType }
+  | { type: 'APPLY_EFFECT'; effect: PowerUpType; questionIndex: number }
   | { type: 'NEW_ROUND' }
   | { type: 'PLAYER_READY'; ready: boolean };

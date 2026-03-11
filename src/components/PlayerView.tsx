@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Peer, DataConnection } from 'peerjs';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, CheckCircle2, XCircle, Loader2, Trophy, AlertCircle, Timer, MessageSquare, Send, Scissors, Zap, Flame, Wind, Box, Target, Shield, Snowflake, TrendingUp, Hand, RotateCcw, RefreshCw, Bomb, Lightbulb, Eye, Magnet, Shuffle, EyeOff, Scan, Brain, Lock, AlertTriangle, Users } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, XCircle, Loader2, Trophy, AlertCircle, Timer, MessageSquare, Send, Zap, Flame, Box, Target, TrendingUp, Contrast, CloudLightning } from 'lucide-react';
 import { GameState, MessageType, ChatMessage, PowerUp, PowerUpType, ActiveEffect } from '../types';
 import { clsx } from 'clsx';
 
@@ -35,6 +35,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
   const [quickCurrentIndex, setQuickCurrentIndex] = useState(0);
   const [quickTimeLeft, setQuickTimeLeft] = useState(0);
   const [quickSubmitted, setQuickSubmitted] = useState(false);
+  const [questionStats, setQuestionStats] = useState<Record<string, Record<string, number>>>({});
   const [quickTotalTime, setQuickTotalTime] = useState(0);
   const [showReview, setShowReview] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -45,8 +46,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
   const [showLuckyBlock, setShowLuckyBlock] = useState(false);
   const [pendingPowerUp, setPendingPowerUp] = useState<PowerUp | null>(null);
   const [showTargetList, setShowTargetList] = useState<string | null>(null);
-  const [shuffledOptions, setShuffledOptions] = useState<string[]>([]);
-  const [scissorsUsed, setScissorsUsed] = useState(false);
 
   const peerRef = useRef<Peer | null>(null);
   const quickTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -82,13 +81,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       peer.destroy();
       if (quickTimerRef.current) clearInterval(quickTimerRef.current);
     };
-  }, []);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setActiveEffects(prev => prev.filter(e => e.endTime > Date.now()));
-    }, 1000);
-    return () => clearInterval(interval);
   }, []);
 
   const joinGame = (e: React.FormEvent) => {
@@ -146,6 +138,12 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       setGameState(data.state);
       if (data.data?.settings) setSettings(data.data.settings);
       
+      if (data.state === 'STARTING') {
+        setQuickAnswers({});
+        setQuestionStats({});
+        setQuickQuestions([]);
+      }
+      
       if (data.state === 'QUESTION') {
         if (data.data.question) {
           setCurrentQuestion(data.data.question);
@@ -165,6 +163,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
         setScissorsUsed(false);
         setAnswerCounts({});
         setRevealedCorrectAnswer(null);
+        setActiveEffects(prev => prev.filter(e => e.questionIndex >= (data.data.questionIndex || 0)));
       }
       if (data.state === 'QUICK_EXAM') {
         setQuickQuestions(data.data.questions);
@@ -195,6 +194,9 @@ export function PlayerView({ onBack }: PlayerViewProps) {
         if (data.data.fullQuestions) {
           setQuickQuestions(data.data.fullQuestions);
         }
+        if (data.data.questionStats) {
+          setQuestionStats(data.data.questionStats);
+        }
         const me = data.data.leaderboard.find((p: any) => p.id === peerRef.current?.id);
         if (me) setMyScore(me.score);
         if (quickTimerRef.current) clearInterval(quickTimerRef.current);
@@ -211,13 +213,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
     }
 
     if (data.type === 'APPLY_EFFECT') {
-      const longEffects = ['SHIELD', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'MAGNET', 'FORCE_FIELD', 'STEALTH_MODE', 'MAGNET_SHIELD', 'XRAY_VISION', 'MIND_READER'];
-      const duration = (longEffects.includes(data.effect) ? 30000 : 5000);
-      setActiveEffects(prev => [...prev, { type: data.effect, endTime: Date.now() + duration }]);
-      
-      if (data.effect === 'SHUFFLE' || data.effect === 'CONFUSION_CLOUD' || data.effect === 'TORNADO') {
-        setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
-      }
+      setActiveEffects(prev => [...prev, { type: data.effect, questionIndex: data.questionIndex }]);
     }
 
     if (data.type === 'PLAYER_LIST') {
@@ -254,6 +250,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       setGameState('LOBBY');
       setQuickQuestions([]);
       setQuickAnswers({});
+      setQuestionStats({});
       setQuickCurrentIndex(0);
       setQuickTimeLeft(0);
       setQuickSubmitted(false);
@@ -270,7 +267,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
     if (selectedAnswer || !connection) return;
 
     // Check for Answer Lock
-    if (activeEffects.some(e => e.type === 'ANSWER_LOCK' && e.endTime > Date.now())) {
+    if (activeEffects.some(e => e.type === 'ANSWER_LOCK' && e.questionIndex === currentQuestionIndex)) {
       return;
     }
 
@@ -333,11 +330,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
     connection.send({ type: 'USE_POWER_UP', powerUpId, targetId });
     setPowerUps(prev => prev.filter(pu => pu.id !== powerUpId));
     setShowTargetList(null);
-  };
-
-  const useScissors = (powerUpId: string) => {
-    setPowerUps(prev => prev.filter(pu => pu.id !== powerUpId));
-    setScissorsUsed(true);
   };
 
   // Option colors for Kahoot-like feel
@@ -714,47 +706,26 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                           className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg border-2 transition-all hover:scale-110"
                         style={{ 
                           backgroundColor: 
-                            pu.type === 'SCISSORS' ? '#4f46e5' : 
                             pu.type === 'LIGHTNING' ? '#eab308' : 
                             pu.type === 'FIREBALL' ? '#ef4444' : 
-                            pu.type === 'TORNADO' ? '#10b981' :
-                            pu.type === 'SHIELD' ? '#3b82f6' :
-                            pu.type === 'FREEZE' ? '#06b6d4' :
                             pu.type === 'DOUBLE_POINTS' ? '#a855f7' : 
-                            pu.type === 'TIME_WARP' ? '#6366f1' :
-                            pu.type === 'REVENGE' ? '#ec4899' :
-                            pu.type === 'BOMB' ? '#18181b' :
-                            pu.type === 'CLUE' ? '#84cc16' :
-                            pu.type === 'REVEAL' ? '#f59e0b' :
-                            pu.type === 'MAGNET' ? '#64748b' :
-                            pu.type === 'SHUFFLE' ? '#7c3aed' : '#f97316',
+                            pu.type === 'INVERT' ? '#ffffff' :
+                            pu.type === 'METEOR' ? '#f87171' : '#f97316',
                           borderColor: 'rgba(255,255,255,0.2)'
                         }}
                         onClick={() => {
-                          if (pu.type === 'SCISSORS') {
-                            useScissors(pu.id);
-                          } else if (['SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'REVEAL', 'MAGNET', 'TIME_WARP'].includes(pu.type)) {
+                          if (['DOUBLE_POINTS'].includes(pu.type)) {
                             usePowerUp(pu.id, peerRef.current?.id || '');
                           } else {
                             setShowTargetList(showTargetList === pu.id ? null : pu.id);
                           }
                         }}
                       >
-                        {pu.type === 'SCISSORS' && <Scissors className="w-7 h-7 text-white" />}
                         {pu.type === 'LIGHTNING' && <Zap className="w-7 h-7 text-white" />}
                         {pu.type === 'FIREBALL' && <Flame className="w-7 h-7 text-white" />}
-                        {pu.type === 'TORNADO' && <Wind className="w-7 h-7 text-white" />}
-                        {pu.type === 'SHIELD' && <Shield className="w-7 h-7 text-white" />}
-                        {pu.type === 'FREEZE' && <Snowflake className="w-7 h-7 text-white" />}
                         {pu.type === 'DOUBLE_POINTS' && <TrendingUp className="w-7 h-7 text-white" />}
-                        {pu.type === 'THIEF' && <Hand className="w-7 h-7 text-white" />}
-                        {pu.type === 'TIME_WARP' && <RotateCcw className="w-7 h-7 text-white" />}
-                        {pu.type === 'REVENGE' && <RefreshCw className="w-7 h-7 text-white" />}
-                        {pu.type === 'BOMB' && <Bomb className="w-7 h-7 text-white" />}
-                        {pu.type === 'CLUE' && <Lightbulb className="w-7 h-7 text-white" />}
-                        {pu.type === 'REVEAL' && <Eye className="w-7 h-7 text-white" />}
-                        {pu.type === 'MAGNET' && <Magnet className="w-7 h-7 text-white" />}
-                        {pu.type === 'SHUFFLE' && <Shuffle className="w-7 h-7 text-white" />}
+                        {pu.type === 'INVERT' && <Contrast className="w-7 h-7 text-black" />}
+                        {pu.type === 'METEOR' && <CloudLightning className="w-7 h-7 text-white" />}
                         </motion.button>
 
                         {showTargetList === pu.id && (
@@ -795,119 +766,16 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                     Question {currentQuestionIndex + 1} of {totalQuestions}
                   </span>
                   <div className="relative">
-                    {/* Lightning / Blinding Blast Effect */}
-                    {(activeEffects.some(e => e.type === 'LIGHTNING' && e.endTime > Date.now()) || 
-                      activeEffects.some(e => e.type === 'BLINDING_BLAST' && e.endTime > Date.now())) && (
+                    {/* Lightning Effect */}
+                    {activeEffects.some(e => e.type === 'LIGHTNING' && e.questionIndex === currentQuestionIndex) && (
                       <div className="absolute inset-0 bg-zinc-950 z-10 flex flex-col items-center justify-center text-yellow-400 animate-pulse rounded-2xl">
                         <Zap className="w-12 h-12 mb-2" />
                         <h3 className="text-lg font-bold uppercase tracking-widest">Blinded!</h3>
                       </div>
                     )}
 
-                    {/* Freeze / Time Freeze Effect */}
-                    {(activeEffects.some(e => e.type === 'FREEZE' && e.endTime > Date.now()) ||
-                      activeEffects.some(e => e.type === 'TIME_FREEZE' && e.endTime > Date.now())) && (
-                      <div className="absolute inset-0 bg-cyan-500/10 z-10 pointer-events-none border-4 border-cyan-400/30 rounded-2xl backdrop-blur-[1px]">
-                        <div className="absolute top-2 right-2 text-cyan-400 animate-pulse">
-                          <Snowflake className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Shield / Force Field Effect */}
-                    {(activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now()) ||
-                      activeEffects.some(e => e.type === 'FORCE_FIELD' && e.endTime > Date.now())) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none border-4 border-blue-500/50 rounded-2xl shadow-[inset_0_0_30px_rgba(59,130,246,0.2)]">
-                        <div className="absolute top-2 left-2 text-blue-400">
-                          <Shield className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Revenge Effect */}
-                    {activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none border-4 border-pink-500/50 rounded-2xl shadow-[inset_0_0_30px_rgba(236,72,153,0.2)]">
-                        <div className="absolute bottom-2 right-2 text-pink-400 animate-spin-slow">
-                          <RefreshCw className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Magnet / Magnet Shield Effect */}
-                    {(activeEffects.some(e => e.type === 'MAGNET' && e.endTime > Date.now()) ||
-                      activeEffects.some(e => e.type === 'MAGNET_SHIELD' && e.endTime > Date.now())) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none">
-                        <div className="absolute top-2 right-10 text-slate-400 animate-bounce">
-                          <Magnet className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Clue Effect */}
-                    {activeEffects.some(e => e.type === 'CLUE' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none bg-lime-500/5">
-                        <div className="absolute bottom-2 left-2 text-lime-400">
-                          <Lightbulb className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Sabotage Effect */}
-                    {activeEffects.some(e => e.type === 'SABOTAGE' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none bg-red-500/20 border-4 border-red-500/50 rounded-2xl">
-                        <div className="absolute top-2 left-2 text-red-500">
-                          <AlertTriangle className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Answer Lock Effect */}
-                    {activeEffects.some(e => e.type === 'ANSWER_LOCK' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none border-4 border-slate-500/50 rounded-2xl">
-                        <div className="absolute top-2 right-2 text-slate-400">
-                          <Lock className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Stealth Mode Effect */}
-                    {activeEffects.some(e => e.type === 'STEALTH_MODE' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none opacity-50">
-                        <div className="absolute top-2 left-10 text-slate-400">
-                          <EyeOff className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* X-Ray Vision Effect */}
-                    {activeEffects.some(e => e.type === 'XRAY_VISION' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none">
-                        <div className="absolute bottom-2 right-10 text-cyan-400">
-                          <Scan className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Mind Reader Effect */}
-                    {activeEffects.some(e => e.type === 'MIND_READER' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none">
-                        <div className="absolute bottom-10 right-2 text-purple-400">
-                          <Brain className="w-6 h-6" />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Bomb Effect */}
-                    {activeEffects.some(e => e.type === 'BOMB' && e.endTime > Date.now()) && (
-                      <div className="absolute inset-0 z-10 pointer-events-none bg-red-900/10 rounded-2xl">
-                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-ping">
-                          <Bomb className="w-20 h-20" />
-                        </div>
-                      </div>
-                    )}
-
                     {/* Double Points Indicator */}
-                    {activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now()) && (
+                    {activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndex) && (
                       <motion.div 
                         initial={{ scale: 0, y: -20 }}
                         animate={{ scale: 1, y: 0 }}
@@ -923,7 +791,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                 
                 <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 relative">
                   {/* Fireball Effect */}
-                  {activeEffects.some(e => e.type === 'FIREBALL' && e.endTime > Date.now()) && (
+                  {activeEffects.some(e => e.type === 'FIREBALL' && e.questionIndex === currentQuestionIndex) && (
                     <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden rounded-3xl">
                       <div className="absolute inset-0 bg-orange-600/60 backdrop-blur-sm mix-blend-overlay" />
                       {[...Array(6)].map((_, i) => (
@@ -941,10 +809,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                     </div>
                   )}
 
-                  {(activeEffects.some(e => (e.type === 'TORNADO' || e.type === 'CONFUSION_CLOUD' || e.type === 'SHUFFLE') && e.endTime > Date.now()) 
-                    ? shuffledOptions 
-                    : currentQuestion.options
-                  ).map((opt: string, i: number) => {
+                  {currentQuestion.options.map((opt: string, i: number) => {
                     const colors = [
                       'bg-rose-500 hover:bg-rose-400 shadow-[0_6px_0_rgb(159,18,57)]',
                       'bg-blue-500 hover:bg-blue-400 shadow-[0_6px_0_rgb(30,58,138)]',
@@ -962,20 +827,13 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                     const isSelected = selectedAnswer === opt;
                     const isDisabled = !!selectedAnswer;
 
-                    // X-Ray Vision: Highlight correct answer
-                    const isCorrect = opt === (revealedCorrectAnswer || currentQuestion.correctAnswer);
-                    const xrayActive = activeEffects.some(e => e.type === 'XRAY_VISION' && e.endTime > Date.now());
+                    // Invert: Swap answers visually
+                    const invertActive = activeEffects.some(e => e.type === 'INVERT' && e.questionIndex === currentQuestionIndex);
+                    const displayOpt = invertActive ? currentQuestion.options[(i + 2) % 4] : opt;
                     
-                    // Mind Reader: Show answer counts
-                    const mindReaderActive = activeEffects.some(e => e.type === 'MIND_READER' && e.endTime > Date.now());
-                    const count = answerCounts[opt] || 0;
-
-                    // Scissors effect: hide 2 wrong answers
-                    const isWrong = opt !== currentQuestion.correctAnswer;
-                    const wrongOptions = currentQuestion.options.filter((o: string) => o !== currentQuestion.correctAnswer);
-                    const hiddenByScissors = scissorsUsed && isWrong && wrongOptions.indexOf(opt) < 2;
-
-                    if (hiddenByScissors && !answerResult) return <div key={i} className="min-h-[120px]" />;
+                    // Meteor: Hide some options
+                    const meteorActive = activeEffects.some(e => e.type === 'METEOR' && e.questionIndex === currentQuestionIndex);
+                    const isHidden = meteorActive && (i === 1 || i === 3);
 
                     return (
                       <button
@@ -986,25 +844,16 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                           "relative p-6 md:p-8 rounded-3xl text-xl md:text-2xl font-bold transition-all flex items-center gap-6 min-h-[120px] md:min-h-[160px] group",
                           isSelected ? selectedColors[i % 4] : colors[i % 4],
                           isDisabled && !isSelected ? "opacity-40 grayscale-[0.5]" : "",
-                          !isDisabled && "active:translate-y-[6px] active:shadow-none"
+                          !isDisabled && "active:translate-y-[6px] active:shadow-none",
+                          isHidden && "opacity-0 pointer-events-none"
                         )}
                       >
                         <div className="w-12 h-12 md:w-16 md:h-16 rounded-2xl bg-white/20 flex items-center justify-center text-2xl md:text-3xl flex-shrink-0">
                           {labels[i]}
                         </div>
                         <div className="flex-1 flex flex-col items-start">
-                          <span className="text-left leading-tight drop-shadow-md">{opt}</span>
-                          {mindReaderActive && count > 0 && (
-                            <span className="text-xs font-bold opacity-80 mt-1 bg-black/20 px-2 py-0.5 rounded flex items-center gap-1">
-                              <Users className="w-3 h-3" /> {count} players
-                            </span>
-                          )}
+                          <span className="text-left leading-tight drop-shadow-md">{displayOpt}</span>
                         </div>
-                        {xrayActive && isCorrect && (
-                          <div className="absolute top-2 right-2 text-white animate-pulse">
-                            <CheckCircle2 className="w-6 h-6" />
-                          </div>
-                        )}
                       </button>
                     );
                   })}
@@ -1254,12 +1103,16 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                         const isSelected = userAnswer === opt;
                         const isActualCorrect = correctAnswer === opt;
                         const labels = ['A', 'B', 'C', 'D'];
+                        const stats: Record<string, number> = questionStats[q.id] || {};
+                        const count = stats[opt] || 0;
+                        const totalAnswers = Object.values(stats).reduce((a: number, b: number) => a + b, 0);
+                        const percentage = totalAnswers > 0 ? Math.round((count / totalAnswers) * 100) : 0;
                         
                         return (
                           <div 
                             key={i}
                             className={clsx(
-                              "p-5 rounded-2xl border-2 flex items-center gap-4 transition-all",
+                              "p-5 rounded-2xl border-2 flex flex-col gap-3 transition-all relative overflow-hidden",
                               isActualCorrect
                                 ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-100 shadow-[0_0_20px_rgba(16,185,129,0.15)]"
                                 : isSelected
@@ -1267,20 +1120,41 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                                   : "bg-zinc-950/50 border-white/5 text-zinc-500"
                             )}
                           >
-                            <div className={clsx(
-                              "w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0",
-                              isActualCorrect ? "bg-emerald-500/30 text-emerald-300" :
-                              isSelected ? "bg-red-500/30 text-red-300" :
-                              "bg-white/5 text-zinc-600"
-                            )}>
-                              {labels[i]}
+                            {/* Background progress bar for stats */}
+                            {totalAnswers > 0 && (
+                              <div 
+                                className={clsx(
+                                  "absolute left-0 top-0 bottom-0 opacity-10 z-0",
+                                  isActualCorrect ? "bg-emerald-500" : isSelected ? "bg-red-500" : "bg-white"
+                                )}
+                                style={{ width: `${percentage}%` }}
+                              />
+                            )}
+                            
+                            <div className="flex items-center gap-4 relative z-10 w-full">
+                              <div className={clsx(
+                                "w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0",
+                                isActualCorrect ? "bg-emerald-500/30 text-emerald-300" :
+                                isSelected ? "bg-red-500/30 text-red-300" :
+                                "bg-white/5 text-zinc-600"
+                              )}>
+                                {labels[i]}
+                              </div>
+                              <span className="flex-1 text-lg">{opt}</span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                {isSelected && !isActualCorrect && <span className="text-xs font-bold uppercase tracking-wider opacity-80 text-red-300 mr-2">Your Answer</span>}
+                                {isActualCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-400" />}
+                                {isSelected && !isActualCorrect && <XCircle className="w-6 h-6 text-red-400" />}
+                              </div>
                             </div>
-                            <span className="flex-1 text-lg">{opt}</span>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              {isSelected && !isActualCorrect && <span className="text-xs font-bold uppercase tracking-wider opacity-80 text-red-300 mr-2">Your Answer</span>}
-                              {isActualCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-400" />}
-                              {isSelected && !isActualCorrect && <XCircle className="w-6 h-6 text-red-400" />}
-                            </div>
+                            
+                            {/* Stats display */}
+                            {totalAnswers > 0 && (
+                              <div className="flex items-center justify-between text-xs font-medium opacity-70 relative z-10 pl-14">
+                                <span>{count} {count === 1 ? 'player' : 'players'} selected this</span>
+                                <span>{percentage}%</span>
+                              </div>
+                            )}
                           </div>
                         );
                       })}

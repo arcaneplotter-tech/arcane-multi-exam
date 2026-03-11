@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Peer, DataConnection } from 'peerjs';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Users, Play, ArrowLeft, Trophy, CheckCircle2, XCircle, Loader2, Copy, Check, Timer, ChevronDown, ChevronUp, Settings, MessageSquare, Send, Scissors, Zap, Flame, Wind, Box, Target, Shield, Snowflake, TrendingUp, Hand, RotateCcw, RefreshCw, Bomb, Lightbulb, Eye, Magnet, Shuffle } from 'lucide-react';
+import { Upload, Users, Play, ArrowLeft, Trophy, CheckCircle2, XCircle, Loader2, Copy, Check, Timer, ChevronDown, ChevronUp, Settings, MessageSquare, Send, Zap, Flame, Box, Target, TrendingUp, Contrast, CloudLightning } from 'lucide-react';
 import Papa from 'papaparse';
 import { PowerCatalog } from './PowerCatalog';
 import { POWER_UPS_INFO } from '../constants/powerUps';
@@ -70,7 +70,9 @@ export function HostView({ onBack }: HostViewProps) {
   const currentQuestionIndexRef = useRef(0);
   const questionsRef = useRef<Question[]>([]);
   const settingsRef = useRef<GameSettings>(settings);
+  const gameStateRef = useRef<GameState>(gameState);
   const isHandlingQuestionEndRef = useRef(false);
+  const questionStatsRef = useRef<Record<string, Record<string, number>>>({});
   
   // Keep ref updated for callbacks
   useEffect(() => {
@@ -92,6 +94,10 @@ export function HostView({ onBack }: HostViewProps) {
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
 
   useEffect(() => {
     // Generate a 6 digit random code
@@ -156,7 +162,7 @@ export function HostView({ onBack }: HostViewProps) {
 
     const playerList = message.type === 'PLAYER_LIST' ? message.players.map((p: any) => {
       const originalPlayer = playersRef.current.find(op => op.id === p.id);
-      const isStealth = originalPlayer?.activeEffects.some(e => e.type === 'STEALTH_MODE' && e.endTime > Date.now());
+      const isStealth = originalPlayer?.activeEffects.some(e => e.type === 'STEALTH_MODE' && e.questionIndex === currentQuestionIndexRef.current);
       if (isStealth && p.id !== 'host') {
         return { ...p, name: 'Hidden Player', score: '???' };
       }
@@ -171,12 +177,12 @@ export function HostView({ onBack }: HostViewProps) {
           const payload = { ...msgToSend };
           
           // Special info for Mind Reader
-          if (p.activeEffects.some(e => e.type === 'MIND_READER' && e.endTime > Date.now())) {
+          if (p.activeEffects.some(e => e.type === 'MIND_READER' && e.questionIndex === currentQuestionIndexRef.current)) {
             payload.answerCounts = answerCounts;
           }
 
           // Special info for X-Ray Vision
-          if (p.activeEffects.some(e => e.type === 'XRAY_VISION' && e.endTime > Date.now())) {
+          if (p.activeEffects.some(e => e.type === 'XRAY_VISION' && e.questionIndex === currentQuestionIndexRef.current)) {
             const q = questionsRef.current[currentQuestionIndexRef.current];
             if (q) {
               payload.correctAnswer = q.correctAnswer;
@@ -282,12 +288,17 @@ export function HostView({ onBack }: HostViewProps) {
       setPlayers(prev => prev.map(p => {
         if (p.id === conn.peer && !p.hasAnswered) {
           const q = questionsRef.current[currentQuestionIndexRef.current];
+          
+          // Update question stats
+          questionStatsRef.current[q.id] = questionStatsRef.current[q.id] || {};
+          questionStatsRef.current[q.id][data.answer] = (questionStatsRef.current[q.id][data.answer] || 0) + 1;
+
           const isCorrect = data.answer === q.correctAnswer;
           let points = 0;
           
           if (isCorrect) {
-            const hasDoublePoints = p.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now());
-            const hasClue = p.activeEffects.some(e => e.type === 'CLUE' && e.endTime > Date.now());
+            const hasDoublePoints = p.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndexRef.current);
+            const hasClue = p.activeEffects.some(e => e.type === 'CLUE' && e.questionIndex === currentQuestionIndexRef.current);
             
             points = Math.round(1000 * (timeLeftRef.current / q.timeLimit) * settingsRef.current.pointMultiplier);
             
@@ -309,14 +320,14 @@ export function HostView({ onBack }: HostViewProps) {
                 .filter(([_, config]: [string, any]) => config.enabled)
                 .map(([type]) => type as PowerUpType);
               
-              const fallbackTypes: PowerUpType[] = ['SCISSORS', 'LIGHTNING', 'FIREBALL', 'TORNADO', 'SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'THIEF', 'TIME_WARP', 'MIRROR_MIND', 'BOMB', 'CLUE', 'REVEAL', 'MAGNET', 'SHUFFLE'];
+              const fallbackTypes: PowerUpType[] = ['LIGHTNING', 'FIREBALL', 'DOUBLE_POINTS', 'INVERT', 'METEOR'];
               const availableTypes = enabledPowerUps.length > 0 ? enabledPowerUps : fallbackTypes;
               
               const type = availableTypes[Math.floor(Math.random() * availableTypes.length)];
               const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
               
               // MAGNET logic: check if anyone else has MAGNET active
-              const magnetHolder = playersRef.current.find(p => p.id !== conn.peer && p.activeEffects.some(e => e.type === 'MAGNET' && e.endTime > Date.now()));
+              const magnetHolder = playersRef.current.find(p => p.id !== conn.peer && p.activeEffects.some(e => e.type === 'MAGNET' && e.questionIndex === currentQuestionIndexRef.current));
               
               if (magnetHolder) {
                 // Give to magnet holder instead
@@ -339,7 +350,7 @@ export function HostView({ onBack }: HostViewProps) {
               }
             }
           } else {
-            const hasBomb = p.activeEffects.some(e => e.type === 'BOMB' && e.endTime > Date.now());
+            const hasBomb = p.activeEffects.some(e => e.type === 'BOMB' && e.questionIndex === currentQuestionIndexRef.current);
             points = -settingsRef.current.penaltyPoints;
             if (hasBomb) {
               points -= 500;
@@ -375,6 +386,10 @@ export function HostView({ onBack }: HostViewProps) {
           let wrongAnswers = 0;
           questions.forEach(q => {
             const answer = data.answers[q.id];
+            if (answer) {
+              questionStatsRef.current[q.id] = questionStatsRef.current[q.id] || {};
+              questionStatsRef.current[q.id][answer] = (questionStatsRef.current[q.id][answer] || 0) + 1;
+            }
             if (answer === q.correctAnswer) {
               correctAnswers++;
             } else if (answer) {
@@ -419,12 +434,12 @@ export function HostView({ onBack }: HostViewProps) {
             } else {
               setPlayers(prev => prev.map(p => p.id === conn.peer ? { 
                 ...p, 
-                activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + duration }] 
+                activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
               } : p));
             }
 
             if (conn.open) {
-              conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+              conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
             }
 
             if (powerUp.type === 'REVEAL') {
@@ -449,8 +464,8 @@ export function HostView({ onBack }: HostViewProps) {
             // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
             const target = playersRef.current.find(p => p.id === targetId);
             if (target) {
-              const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now());
-              const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now());
+              const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndexRef.current);
+              const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndexRef.current);
               
               if (hasMirror && powerUp.type !== 'THIEF') {
                 // Reflect back to sender
@@ -461,7 +476,7 @@ export function HostView({ onBack }: HostViewProps) {
                 
                 const msg = `Mirror reflected ${powerUp.type} back to ${player.name}!`;
                 if (conn.open) {
-                  conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+                  conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
                   conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
                 }
                 return;
@@ -538,7 +553,7 @@ export function HostView({ onBack }: HostViewProps) {
                 if (targetId === 'host') {
                   setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
                 } else if (target.connection && target.connection.open) {
-                  target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+                  target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
                 }
               } else if (powerUp.type === 'ANSWER_LOCK') {
                 setPlayers(prev => prev.map(p => p.id === targetId ? { 
@@ -555,10 +570,10 @@ export function HostView({ onBack }: HostViewProps) {
               } else if (targetId === 'host') {
                 setPlayers(prev => prev.map(p => p.id === 'host' ? { 
                   ...p, 
-                  activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+                  activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
                 } : p));
               } else if (target.connection && target.connection.open) {
-                target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+                target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
               }
             }
           }
@@ -607,7 +622,7 @@ export function HostView({ onBack }: HostViewProps) {
     const interval = setInterval(() => {
       setPlayers(prev => prev.map(p => ({
         ...p,
-        activeEffects: p.activeEffects.filter(e => e.endTime > Date.now())
+        activeEffects: p.activeEffects.filter(e => e.questionIndex === currentQuestionIndexRef.current)
       })));
     }, 1000);
     return () => clearInterval(interval);
@@ -660,6 +675,7 @@ export function HostView({ onBack }: HostViewProps) {
   const startGame = () => {
     if (questions.length === 0) return alert('Please upload questions first');
     if (players.length === 0) return alert('Waiting for players to join');
+    if (!players.every(p => p.isReady)) return alert('Waiting for all players to be ready');
 
     // Ensure host is a participant
     if (!players.find(p => p.id === 'host')) {
@@ -695,6 +711,8 @@ export function HostView({ onBack }: HostViewProps) {
     
     setQuestions(finalQuestions);
     setGameState('STARTING');
+    questionStatsRef.current = {};
+    setHostQuickAnswers({});
     broadcast({ type: 'STATE_UPDATE', state: 'STARTING' });
     
     let countdown = 3;
@@ -764,7 +782,8 @@ export function HostView({ onBack }: HostViewProps) {
       state: 'LEADERBOARD',
       data: {
         leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score, timeTaken: p.timeTaken })).sort((a, b) => b.score - a.score),
-        fullQuestions: questionsRef.current // Send full questions including correct answers for review
+        fullQuestions: questionsRef.current, // Send full questions including correct answers for review
+        questionStats: questionStatsRef.current
       }
     });
   };
@@ -787,6 +806,10 @@ export function HostView({ onBack }: HostViewProps) {
 
     questions.forEach(q => {
       const answer = hostQuickAnswers[q.id];
+      if (answer) {
+        questionStatsRef.current[q.id] = questionStatsRef.current[q.id] || {};
+        questionStatsRef.current[q.id][answer] = (questionStatsRef.current[q.id][answer] || 0) + 1;
+      }
       if (answer === q.correctAnswer) {
         correctAnswers++;
       }
@@ -831,7 +854,7 @@ export function HostView({ onBack }: HostViewProps) {
     if (timerRef.current) clearInterval(timerRef.current);
     
     timerRef.current = setInterval(() => {
-      const anyFreeze = playersRef.current.some(p => p.activeEffects.some(e => e.type === 'FREEZE' && e.endTime > Date.now()));
+      const anyFreeze = playersRef.current.some(p => p.activeEffects.some(e => e.type === 'FREEZE' && e.questionIndex === currentQuestionIndexRef.current));
       if (anyFreeze) return;
       
       setTimeLeft(prev => {
@@ -916,7 +939,8 @@ export function HostView({ onBack }: HostViewProps) {
           state: 'LEADERBOARD',
           data: {
             leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
-            fullQuestions: questionsRef.current
+            fullQuestions: questionsRef.current,
+            questionStats: questionStatsRef.current
           }
         });
       } else {
@@ -937,7 +961,8 @@ export function HostView({ onBack }: HostViewProps) {
           state: 'LEADERBOARD',
           data: {
             leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
-            fullQuestions: questionsRef.current
+            fullQuestions: questionsRef.current,
+            questionStats: questionStatsRef.current
           }
         });
       } else {
@@ -951,7 +976,8 @@ export function HostView({ onBack }: HostViewProps) {
           state: 'FINISHED',
           data: {
             leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
-            fullQuestions: questionsRef.current
+            fullQuestions: questionsRef.current,
+            questionStats: questionStatsRef.current
           }
         });
       } else {
@@ -1002,7 +1028,7 @@ export function HostView({ onBack }: HostViewProps) {
       } else {
         setPlayers(prev => prev.map(p => p.id === 'host' ? { 
           ...p, 
-          activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + duration }] 
+          activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
         } : p));
       }
 
@@ -1027,8 +1053,8 @@ export function HostView({ onBack }: HostViewProps) {
       // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
       const target = players.find(p => p.id === targetId);
       if (target) {
-        const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now());
-        const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now());
+        const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndexRef.current);
+        const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndexRef.current);
 
         if (hasMirror && powerUp.type !== 'THIEF') {
           // Reflect back to host
@@ -1039,7 +1065,7 @@ export function HostView({ onBack }: HostViewProps) {
           
           setPlayers(prev => prev.map(p => p.id === 'host' ? { 
             ...p, 
-            activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+            activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
           } : p));
           
           const msg = `Revenge reflected ${powerUp.type} back to the Host!`;
@@ -1109,7 +1135,7 @@ export function HostView({ onBack }: HostViewProps) {
           if (targetId === 'host') {
             setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
           } else if (target.connection && target.connection.open) {
-            target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+            target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
           }
         } else if (powerUp.type === 'ANSWER_LOCK') {
           setPlayers(prev => prev.map(p => p.id === targetId ? { 
@@ -1124,10 +1150,10 @@ export function HostView({ onBack }: HostViewProps) {
         } else if (targetId === 'host') {
           setPlayers(prev => prev.map(p => p.id === 'host' ? { 
             ...p, 
-            activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+            activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
           } : p));
         } else if (target.connection && target.connection.open) {
-          target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+          target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
         }
       }
     }
@@ -1556,7 +1582,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
 
               <button
                 onClick={startGame}
-                disabled={questions.length === 0 || players.length === 0}
+                disabled={questions.length === 0 || players.length === 0 || !players.every(p => p.isReady)}
                 className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all"
               >
                 <Play className="w-6 h-6" />
@@ -1718,47 +1744,26 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                         className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg border-2 transition-all hover:scale-110"
                         style={{ 
                           backgroundColor: 
-                            pu.type === 'SCISSORS' ? '#4f46e5' : 
                             pu.type === 'LIGHTNING' ? '#eab308' : 
                             pu.type === 'FIREBALL' ? '#ef4444' : 
-                            pu.type === 'TORNADO' ? '#10b981' :
-                            pu.type === 'SHIELD' ? '#3b82f6' :
-                            pu.type === 'FREEZE' ? '#06b6d4' :
                             pu.type === 'DOUBLE_POINTS' ? '#a855f7' : 
-                            pu.type === 'TIME_WARP' ? '#6366f1' :
-                            pu.type === 'REVENGE' ? '#ec4899' :
-                            pu.type === 'BOMB' ? '#18181b' :
-                            pu.type === 'CLUE' ? '#84cc16' :
-                            pu.type === 'REVEAL' ? '#f59e0b' :
-                            pu.type === 'MAGNET' ? '#64748b' :
-                            pu.type === 'SHUFFLE' ? '#7c3aed' : '#f97316',
+                            pu.type === 'INVERT' ? '#ffffff' :
+                            pu.type === 'METEOR' ? '#f87171' : '#f97316',
                           borderColor: 'rgba(255,255,255,0.2)'
                         }}
                         onClick={() => {
-                          if (pu.type === 'SCISSORS') {
-                            useScissors(pu.id);
-                          } else if (['SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'REVEAL', 'MAGNET', 'TIME_WARP'].includes(pu.type)) {
+                          if (['DOUBLE_POINTS'].includes(pu.type)) {
                             usePowerUp(pu.id, 'host');
                           } else {
                             setShowTargetList(showTargetList === pu.id ? null : pu.id);
                           }
                         }}
                       >
-                        {pu.type === 'SCISSORS' && <Scissors className="w-7 h-7 text-white" />}
                         {pu.type === 'LIGHTNING' && <Zap className="w-7 h-7 text-white" />}
                         {pu.type === 'FIREBALL' && <Flame className="w-7 h-7 text-white" />}
-                        {pu.type === 'TORNADO' && <Wind className="w-7 h-7 text-white" />}
-                        {pu.type === 'SHIELD' && <Shield className="w-7 h-7 text-white" />}
-                        {pu.type === 'FREEZE' && <Snowflake className="w-7 h-7 text-white" />}
                         {pu.type === 'DOUBLE_POINTS' && <TrendingUp className="w-7 h-7 text-white" />}
-                        {pu.type === 'THIEF' && <Hand className="w-7 h-7 text-white" />}
-                        {pu.type === 'TIME_WARP' && <RotateCcw className="w-7 h-7 text-white" />}
-                        {pu.type === 'REVENGE' && <RefreshCw className="w-7 h-7 text-white" />}
-                        {pu.type === 'BOMB' && <Bomb className="w-7 h-7 text-white" />}
-                        {pu.type === 'CLUE' && <Lightbulb className="w-7 h-7 text-white" />}
-                        {pu.type === 'REVEAL' && <Eye className="w-7 h-7 text-white" />}
-                        {pu.type === 'MAGNET' && <Magnet className="w-7 h-7 text-white" />}
-                        {pu.type === 'SHUFFLE' && <Shuffle className="w-7 h-7 text-white" />}
+                        {pu.type === 'INVERT' && <Contrast className="w-7 h-7 text-black" />}
+                        {pu.type === 'METEOR' && <CloudLightning className="w-7 h-7 text-white" />}
                       </motion.button>
 
                       {showTargetList === pu.id && (
@@ -1799,7 +1804,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                 timeLeft <= 5 ? "border-red-500 text-red-500 bg-red-500/10 animate-pulse" : "border-indigo-500 text-indigo-400 bg-indigo-500/10"
               )}>
                 {timeLeft}
-                {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now()) && (
+                {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndex) && (
                   <motion.div 
                     initial={{ scale: 0 }}
                     animate={{ scale: 1 }}
@@ -1813,7 +1818,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
 
             <div className="w-full bg-zinc-900 border border-white/10 rounded-[3rem] p-10 md:p-16 shadow-2xl mb-8 relative overflow-hidden">
               {/* Lightning Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'LIGHTNING' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'LIGHTNING' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 bg-zinc-950 z-10 flex flex-col items-center justify-center text-yellow-400 animate-pulse">
                   <Zap className="w-20 h-20 mb-4" />
                   <h3 className="text-2xl font-bold uppercase tracking-widest">Blinded by Lightning!</h3>
@@ -1821,7 +1826,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Freeze Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FREEZE' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FREEZE' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 bg-cyan-500/10 z-10 pointer-events-none border-4 border-cyan-400/30 rounded-[3rem] backdrop-blur-[1px]">
                   <div className="absolute top-4 right-4 text-cyan-400 animate-pulse">
                     <Snowflake className="w-10 h-10" />
@@ -1830,7 +1835,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Shield Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-10 pointer-events-none border-4 border-blue-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(59,130,246,0.2)]">
                   <div className="absolute top-4 left-4 text-blue-400">
                     <Shield className="w-8 h-8" />
@@ -1839,7 +1844,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Revenge Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-10 pointer-events-none border-4 border-pink-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(236,72,153,0.2)]">
                   <div className="absolute bottom-4 right-4 text-pink-400 animate-spin-slow">
                     <RefreshCw className="w-10 h-10" />
@@ -1848,7 +1853,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Magnet Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'MAGNET' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'MAGNET' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-10 pointer-events-none">
                   <div className="absolute top-4 right-16 text-slate-400 animate-bounce">
                     <Magnet className="w-8 h-8" />
@@ -1857,7 +1862,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Clue Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'CLUE' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'CLUE' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-10 pointer-events-none bg-lime-500/5">
                   <div className="absolute bottom-4 left-4 text-lime-400">
                     <Lightbulb className="w-8 h-8" />
@@ -1866,7 +1871,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
               )}
 
               {/* Bomb Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'BOMB' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'BOMB' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-10 pointer-events-none bg-red-900/10 rounded-[3rem]">
                   <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-ping">
                     <Bomb className="w-32 h-32" />
@@ -1902,7 +1907,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
 
             <div className="w-full grid md:grid-cols-2 gap-6 mb-12 relative">
               {/* Fireball Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FIREBALL' && e.endTime > Date.now()) && (
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FIREBALL' && e.questionIndex === currentQuestionIndex) && (
                 <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden rounded-3xl">
                   <div className="absolute inset-0 bg-orange-600/20 mix-blend-overlay" />
                   {[...Array(10)].map((_, i) => (
@@ -1920,7 +1925,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                 </div>
               )}
 
-              {(players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'TORNADO' && e.endTime > Date.now()) 
+              {(players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'TORNADO' && e.questionIndex === currentQuestionIndex) 
                 ? shuffledOptions 
                 : questions[currentQuestionIndex].options
               ).map((opt, i) => {
@@ -1958,8 +1963,13 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                   
                   const q = questions[currentQuestionIndex];
                   setHostQuickAnswers(prev => ({ ...prev, [q.id]: opt }));
+                  
+                  // Update stats
+                  questionStatsRef.current[q.id] = questionStatsRef.current[q.id] || {};
+                  questionStatsRef.current[q.id][opt] = (questionStatsRef.current[q.id][opt] || 0) + 1;
+
                   const isCorrect = opt === q.correctAnswer;
-                  const hasDoublePoints = hostPlayer?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now());
+                  const hasDoublePoints = hostPlayer?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndexRef.current);
                   let points = isCorrect ? Math.round(1000 * (timeLeftRef.current / q.timeLimit)) : 0;
                   if (isCorrect && hasDoublePoints) {
                     points *= 2;
@@ -1970,7 +1980,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                     if (p.id === 'host') {
                       // Chance for lucky block for host
                       if (isCorrect && settingsRef.current.examType === 'NORMAL' && Math.random() < 0.3) {
-                        const powerUpTypes: PowerUpType[] = ['SCISSORS', 'LIGHTNING', 'FIREBALL', 'TORNADO', 'SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'THIEF'];
+                        const powerUpTypes: PowerUpType[] = ['LIGHTNING', 'FIREBALL', 'DOUBLE_POINTS', 'INVERT', 'METEOR'];
                         const type = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
                         const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
                         setPendingPowerUp(powerUp);
@@ -2396,12 +2406,16 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                         const isSelected = userAnswer === opt;
                         const isActualCorrect = correctAnswer === opt;
                         const labels = ['A', 'B', 'C', 'D'];
+                        const stats: Record<string, number> = questionStatsRef.current[q.id] || {};
+                        const count = stats[opt] || 0;
+                        const totalAnswers = Object.values(stats).reduce((a: number, b: number) => a + b, 0);
+                        const percentage = totalAnswers > 0 ? Math.round((count / totalAnswers) * 100) : 0;
                         
                         return (
                           <div 
                             key={i}
                             className={clsx(
-                              "p-5 rounded-2xl border-2 flex items-center gap-4 transition-all",
+                              "p-5 rounded-2xl border-2 flex flex-col gap-3 transition-all relative overflow-hidden",
                               isActualCorrect
                                 ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-100 shadow-[0_0_20px_rgba(16,185,129,0.15)]"
                                 : isSelected
@@ -2409,20 +2423,41 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                                   : "bg-zinc-950/50 border-white/5 text-zinc-500"
                             )}
                           >
-                            <div className={clsx(
-                              "w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0",
-                              isActualCorrect ? "bg-emerald-500/30 text-emerald-300" :
-                              isSelected ? "bg-red-500/30 text-red-300" :
-                              "bg-white/5 text-zinc-600"
-                            )}>
-                              {labels[i]}
+                            {/* Background progress bar for stats */}
+                            {totalAnswers > 0 && (
+                              <div 
+                                className={clsx(
+                                  "absolute left-0 top-0 bottom-0 opacity-10 z-0",
+                                  isActualCorrect ? "bg-emerald-500" : isSelected ? "bg-red-500" : "bg-white"
+                                )}
+                                style={{ width: `${percentage}%` }}
+                              />
+                            )}
+                            
+                            <div className="flex items-center gap-4 relative z-10 w-full">
+                              <div className={clsx(
+                                "w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0",
+                                isActualCorrect ? "bg-emerald-500/30 text-emerald-300" :
+                                isSelected ? "bg-red-500/30 text-red-300" :
+                                "bg-white/5 text-zinc-600"
+                              )}>
+                                {labels[i]}
+                              </div>
+                              <span className="flex-1 text-lg">{opt}</span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                {isSelected && !isActualCorrect && <span className="text-xs font-bold uppercase tracking-wider opacity-80 text-red-300 mr-2">Your Answer</span>}
+                                {isActualCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-400" />}
+                                {isSelected && !isActualCorrect && <XCircle className="w-6 h-6 text-red-400" />}
+                              </div>
                             </div>
-                            <span className="flex-1 text-lg">{opt}</span>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              {isSelected && !isActualCorrect && <span className="text-xs font-bold uppercase tracking-wider opacity-80 text-red-300 mr-2">Your Answer</span>}
-                              {isActualCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-400" />}
-                              {isSelected && !isActualCorrect && <XCircle className="w-6 h-6 text-red-400" />}
-                            </div>
+                            
+                            {/* Stats display */}
+                            {totalAnswers > 0 && (
+                              <div className="flex items-center justify-between text-xs font-medium opacity-70 relative z-10 pl-14">
+                                <span>{count} {count === 1 ? 'player' : 'players'} selected this</span>
+                                <span>{percentage}%</span>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
