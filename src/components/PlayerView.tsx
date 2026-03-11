@@ -27,6 +27,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
   const [revealedCorrectAnswer, setRevealedCorrectAnswer] = useState<string | null>(null);
   const [myScore, setMyScore] = useState(0);
   const [settings, setSettings] = useState<any>(null);
+  const [pointsPop, setPointsPop] = useState<{ score: number; isCorrect: boolean } | null>(null);
 
   // QUICK mode state
   const [quickQuestions, setQuickQuestions] = useState<any[]>([]);
@@ -233,6 +234,10 @@ export function PlayerView({ onBack }: PlayerViewProps) {
         explanation: data.explanation
       });
       setMyScore(prev => prev + data.score);
+      
+      // Points pop animation
+      setPointsPop({ score: data.score, isCorrect: data.correct });
+      setTimeout(() => setPointsPop(null), 2500);
 
       // Update quickQuestions with correct answer and explanation for review
       if (currentQuestion) {
@@ -1176,6 +1181,41 @@ export function PlayerView({ onBack }: PlayerViewProps) {
           </div>
         )}
       </main>
+
+      <AnimatePresence>
+        {pointsPop && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.5, y: 50 }}
+            animate={{ 
+              opacity: [0, 1, 1, 0], 
+              scale: [0.5, 1.2, 1, 1.5], 
+              y: [50, -100, -150, -250] 
+            }}
+            transition={{ duration: 2.5, times: [0, 0.1, 0.8, 1] }}
+            className={clsx(
+              "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[100] pointer-events-none select-none",
+              "flex flex-col items-center justify-center"
+            )}
+          >
+            <div className={clsx(
+              "font-black text-8xl md:text-9xl drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] italic",
+              pointsPop.isCorrect ? "text-emerald-400" : "text-red-500"
+            )}>
+              {pointsPop.isCorrect ? `+${pointsPop.score}` : "0"}
+            </div>
+            {pointsPop.isCorrect && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+                className="text-emerald-300 font-bold text-2xl md:text-3xl tracking-widest uppercase mt-2"
+              >
+                Awesome!
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Review Modal */}
       {showReview && (

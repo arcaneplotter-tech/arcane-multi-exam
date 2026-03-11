@@ -53,6 +53,8 @@ export function HostView({ onBack }: HostViewProps) {
   const [showHostControls, setShowHostControls] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [pointsPop, setPointsPop] = useState<{ score: number; isCorrect: boolean } | null>(null);
+  const [hostLastPoints, setHostLastPoints] = useState<number>(0);
   const [chatInput, setChatInput] = useState('');
   const [promptCopied, setPromptCopied] = useState(false);
   const [showLuckyBlock, setShowLuckyBlock] = useState(false);
@@ -799,6 +801,9 @@ export function HostView({ onBack }: HostViewProps) {
       }
       return p;
     }));
+
+    setPointsPop({ score: totalScore, isCorrect: correctAnswers > 0 });
+    setTimeout(() => setPointsPop(null), 2500);
   };
 
   const startQuestion = (index: number) => {
@@ -891,6 +896,14 @@ export function HostView({ onBack }: HostViewProps) {
         });
       }
     });
+
+    // Trigger points pop for host if they are playing
+    const hostPlayer = playersRef.current.find(p => p.id === 'host');
+    if (hostPlayer) {
+      const isCorrect = hostPlayer.hasAnswered && hostPlayer.currentAnswer === q.correctAnswer;
+      setPointsPop({ score: hostLastPoints, isCorrect });
+      setTimeout(() => setPointsPop(null), 2500);
+    }
 
     if (nextQuestionTimerRef.current) clearTimeout(nextQuestionTimerRef.current);
     // Move to next question after a short delay for visual feedback
@@ -1951,6 +1964,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                   if (isCorrect && hasDoublePoints) {
                     points *= 2;
                   }
+                  setHostLastPoints(points);
 
                   setPlayers(prev => prev.map(p => {
                     if (p.id === 'host') {
@@ -2429,6 +2443,41 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
           </div>
         </div>
       )}
+      
+      <AnimatePresence>
+        {pointsPop && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.5, y: 50 }}
+            animate={{ 
+              opacity: [0, 1, 1, 0], 
+              scale: [0.5, 1.2, 1, 1.5], 
+              y: [50, -100, -150, -250] 
+            }}
+            transition={{ duration: 2.5, times: [0, 0.1, 0.8, 1] }}
+            className={clsx(
+              "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[100] pointer-events-none select-none",
+              "flex flex-col items-center justify-center"
+            )}
+          >
+            <div className={clsx(
+              "font-black text-8xl md:text-9xl drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)] italic",
+              pointsPop.isCorrect ? "text-emerald-400" : "text-red-500"
+            )}>
+              {pointsPop.isCorrect ? `+${pointsPop.score}` : "0"}
+            </div>
+            {pointsPop.isCorrect && (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 }}
+                className="text-emerald-300 font-bold text-2xl md:text-3xl tracking-widest uppercase mt-2"
+              >
+                Awesome!
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
