@@ -1,0 +1,2434 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Peer, DataConnection } from 'peerjs';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Upload, Users, Play, ArrowLeft, Trophy, CheckCircle2, XCircle, Loader2, Copy, Check, Timer, ChevronDown, ChevronUp, Settings, MessageSquare, Send, Scissors, Zap, Flame, Wind, Box, Target, Shield, Snowflake, TrendingUp, Hand, RotateCcw, RefreshCw, Bomb, Lightbulb, Eye, Magnet, Shuffle } from 'lucide-react';
+import Papa from 'papaparse';
+import { PowerCatalog } from './PowerCatalog';
+import { POWER_UPS_INFO } from '../constants/powerUps';
+import { Question, Player, GameState, MessageType, GameSettings, ChatMessage, PowerUp, PowerUpType } from '../types';
+import { clsx } from 'clsx';
+
+interface HostViewProps {
+  onBack: () => void;
+}
+
+export function HostView({ onBack }: HostViewProps) {
+  const [peer, setPeer] = useState<Peer | null>(null);
+  const [roomCode, setRoomCode] = useState<string>('');
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [gameState, setGameState] = useState<GameState>('LOBBY');
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [showAnswer, setShowAnswer] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [csvText, setCsvText] = useState('');
+  const [hostName, setHostName] = useState('');
+  const [settings, setSettings] = useState<GameSettings>({
+    timePerQuestion: 20,
+    examType: 'NORMAL',
+    shuffleQuestions: false,
+    shuffleOptions: false,
+    showCorrectAnswer: true,
+    canSkipQuestions: true,
+    pointMultiplier: 1,
+    penaltyPoints: 0,
+    chaosMode: false,
+    chaosIntensity: 'MILD',
+    powerUpFrequency: 'NORMAL',
+    allowStacking: false,
+    maxActivePowers: 3,
+    chaosDurationMultiplier: 1,
+    enableFriendlyFire: false,
+    autoBalance: false,
+    powerUpConfigs: POWER_UPS_INFO.reduce((acc, p) => ({
+      ...acc,
+      [p.type]: { enabled: true, cooldown: 30 }
+    }), {})
+  });
+  
+  const [hostQuickCurrentIndex, setHostQuickCurrentIndex] = useState(0);
+  const [hostQuickAnswers, setHostQuickAnswers] = useState<Record<string, string>>({});
+  const [hostQuickSubmitted, setHostQuickSubmitted] = useState(false);
+  const [showHostControls, setShowHostControls] = useState(false);
+  const [showReview, setShowReview] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [promptCopied, setPromptCopied] = useState(false);
+  const [showLuckyBlock, setShowLuckyBlock] = useState(false);
+  const [pendingPowerUp, setPendingPowerUp] = useState<PowerUp | null>(null);
+  const [showTargetList, setShowTargetList] = useState<string | null>(null); // powerUpId
+  const [shuffledOptions, setShuffledOptions] = useState<string[]>([]);
+  const [scissorsUsed, setScissorsUsed] = useState(false);
+  
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const nextQuestionTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const playersRef = useRef<Player[]>([]);
+  const timeLeftRef = useRef(0);
+  const currentQuestionIndexRef = useRef(0);
+  const questionsRef = useRef<Question[]>([]);
+  const settingsRef = useRef<GameSettings>(settings);
+  const isHandlingQuestionEndRef = useRef(false);
+  
+  // Keep ref updated for callbacks
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+
+  useEffect(() => {
+    timeLeftRef.current = timeLeft;
+  }, [timeLeft]);
+
+  useEffect(() => {
+    currentQuestionIndexRef.current = currentQuestionIndex;
+  }, [currentQuestionIndex]);
+
+  useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    // Generate a 6 digit random code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const newPeer = new Peer(`arcane-exam-${code}`, {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
+        ]
+      }
+    });
+    
+    newPeer.on('open', (id) => {
+      setRoomCode(code);
+      setPeer(newPeer);
+    });
+
+    newPeer.on('connection', (conn) => {
+      conn.on('data', (data: any) => {
+        handlePlayerMessage(conn, data);
+      });
+      
+      conn.on('close', () => {
+        setPlayers(prev => prev.filter(p => p.id !== conn.peer));
+      });
+    });
+
+    newPeer.on('disconnected', () => {
+      console.log('Host disconnected from signaling server, attempting to reconnect...');
+      newPeer.reconnect();
+    });
+
+    newPeer.on('error', (err: any) => {
+      console.error('PeerJS error:', err);
+      if (err.type === 'unavailable-id') {
+        // If the ID is taken (extremely rare for 6 digits, but possible), try generating a new one
+        const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+        // We'd need to recreate the peer here, but for simplicity we'll just alert
+        alert('Room code collision. Please refresh the page to try again.');
+      }
+    });
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (nextQuestionTimerRef.current) clearTimeout(nextQuestionTimerRef.current);
+      newPeer.destroy();
+    };
+  }, []);
+
+  const broadcast = (message: any) => {
+    // Calculate answer counts for Mind Reader
+    let answerCounts: Record<string, number> | undefined;
+    if (message.type === 'PLAYER_LIST') {
+      answerCounts = {};
+      playersRef.current.forEach(p => {
+        if (p.currentAnswer) {
+          answerCounts![p.currentAnswer] = (answerCounts![p.currentAnswer] || 0) + 1;
+        }
+      });
+    }
+
+    const playerList = message.type === 'PLAYER_LIST' ? message.players.map((p: any) => {
+      const originalPlayer = playersRef.current.find(op => op.id === p.id);
+      const isStealth = originalPlayer?.activeEffects.some(e => e.type === 'STEALTH_MODE' && e.endTime > Date.now());
+      if (isStealth && p.id !== 'host') {
+        return { ...p, name: 'Hidden Player', score: '???' };
+      }
+      return p;
+    }) : undefined;
+
+    playersRef.current.forEach(p => {
+      if (p.connection && p.connection.open) {
+        let msgToSend = playerList ? { ...message, players: playerList } : message;
+        
+        if (message.type === 'PLAYER_LIST') {
+          const payload = { ...msgToSend };
+          
+          // Special info for Mind Reader
+          if (p.activeEffects.some(e => e.type === 'MIND_READER' && e.endTime > Date.now())) {
+            payload.answerCounts = answerCounts;
+          }
+
+          // Special info for X-Ray Vision
+          if (p.activeEffects.some(e => e.type === 'XRAY_VISION' && e.endTime > Date.now())) {
+            const q = questionsRef.current[currentQuestionIndexRef.current];
+            if (q) {
+              payload.correctAnswer = q.correctAnswer;
+            }
+          }
+          msgToSend = payload;
+        }
+        
+        p.connection.send(msgToSend);
+      }
+    });
+  };
+
+  const handlePlayerMessage = (conn: DataConnection, data: MessageType) => {
+    if (data.type === 'JOIN') {
+      const newPlayer: Player = {
+        id: conn.peer,
+        name: data.name,
+        score: 0,
+        hasAnswered: false,
+        currentAnswer: null,
+        connection: conn,
+        powerUps: [],
+        activeEffects: [],
+        correctCount: 0,
+        isReady: false
+      };
+      
+      setPlayers(prev => {
+        // Prevent duplicates
+        if (prev.some(p => p.id === conn.peer)) return prev;
+        return [...prev, newPlayer];
+      });
+
+      conn.send({ 
+        type: 'JOIN_SUCCESS', 
+        playerId: conn.peer,
+        gameState: gameState,
+        settings: settingsRef.current
+      });
+
+      if (gameState === 'QUICK_EXAM') {
+        setTimeout(() => {
+          conn.send({ 
+            type: 'STATE_UPDATE', 
+            state: 'QUICK_EXAM', 
+            data: { 
+              questions: questionsRef.current.map(q => ({ id: q.id, text: q.text, options: q.options, timeLimit: q.timeLimit })),
+              totalTime: questionsRef.current.reduce((acc, q) => acc + q.timeLimit, 0),
+              settings: settingsRef.current
+            } 
+          });
+        }, 500);
+      } else if (gameState === 'QUESTION') {
+        setTimeout(() => {
+          conn.send({ 
+            type: 'STATE_UPDATE', 
+            state: 'QUESTION', 
+            data: { 
+              question: {
+                id: questionsRef.current[currentQuestionIndexRef.current].id,
+                text: questionsRef.current[currentQuestionIndexRef.current].text,
+                options: questionsRef.current[currentQuestionIndexRef.current].options,
+                timeLimit: questionsRef.current[currentQuestionIndexRef.current].timeLimit
+              },
+              questionIndex: currentQuestionIndexRef.current,
+              totalQuestions: questionsRef.current.length,
+              settings: settingsRef.current
+            } 
+          });
+        }, 500);
+      }
+      
+      // Broadcast updated player list
+      setTimeout(() => {
+        broadcast({
+          type: 'PLAYER_LIST',
+          players: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score, isReady: p.isReady }))
+        });
+      }, 500);
+    }
+
+    if (data.type === 'PLAYER_READY') {
+      setPlayers(prev => {
+        const newPlayers = prev.map(p => p.id === conn.peer ? { ...p, isReady: data.ready } : p);
+        
+        // Broadcast updated player list
+        setTimeout(() => {
+          broadcast({
+            type: 'PLAYER_LIST',
+            players: newPlayers.map(p => ({ id: p.id, name: p.name, score: p.score, isReady: p.isReady }))
+          });
+        }, 100);
+        
+        return newPlayers;
+      });
+    }
+
+    if (data.type === 'SUBMIT_ANSWER') {
+      if (conn.peer === 'host' || playersRef.current.find(p => p.id === conn.peer)?.id === 'host') {
+        setHostQuickAnswers(prev => ({ ...prev, [questionsRef.current[currentQuestionIndexRef.current].id]: data.answer }));
+      }
+      setPlayers(prev => prev.map(p => {
+        if (p.id === conn.peer && !p.hasAnswered) {
+          const q = questionsRef.current[currentQuestionIndexRef.current];
+          const isCorrect = data.answer === q.correctAnswer;
+          let points = 0;
+          
+          if (isCorrect) {
+            const hasDoublePoints = p.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now());
+            const hasClue = p.activeEffects.some(e => e.type === 'CLUE' && e.endTime > Date.now());
+            
+            points = Math.round(1000 * (timeLeftRef.current / q.timeLimit) * settingsRef.current.pointMultiplier);
+            
+            if (hasDoublePoints) {
+              points *= 2;
+              // Remove effect
+              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'DOUBLE_POINTS') } : pl));
+            }
+            
+            if (hasClue) {
+              points = Math.round(points * 0.5);
+              // Remove effect
+              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'CLUE') } : pl));
+            }
+            
+            // 100% chance to get a lucky box on correct answer if chaosMode is enabled
+            if (settingsRef.current.chaosMode) {
+              const enabledPowerUps = Object.entries(settingsRef.current.powerUpConfigs || {})
+                .filter(([_, config]: [string, any]) => config.enabled)
+                .map(([type]) => type as PowerUpType);
+              
+              const fallbackTypes: PowerUpType[] = ['SCISSORS', 'LIGHTNING', 'FIREBALL', 'TORNADO', 'SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'THIEF', 'TIME_WARP', 'MIRROR_MIND', 'BOMB', 'CLUE', 'REVEAL', 'MAGNET', 'SHUFFLE'];
+              const availableTypes = enabledPowerUps.length > 0 ? enabledPowerUps : fallbackTypes;
+              
+              const type = availableTypes[Math.floor(Math.random() * availableTypes.length)];
+              const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
+              
+              // MAGNET logic: check if anyone else has MAGNET active
+              const magnetHolder = playersRef.current.find(p => p.id !== conn.peer && p.activeEffects.some(e => e.type === 'MAGNET' && e.endTime > Date.now()));
+              
+              if (magnetHolder) {
+                // Give to magnet holder instead
+                if (magnetHolder.id === 'host') {
+                  setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, powerUp] } : p));
+                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `Magnet attracted a power-up from ${p.name}!`, timestamp: Date.now() }]);
+                } else if (magnetHolder.connection && magnetHolder.connection.open) {
+                  magnetHolder.connection.send({ type: 'GIVE_POWER_UP', powerUp });
+                  magnetHolder.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Magnet attracted a power-up from ${p.name}!`, timestamp: Date.now() }});
+                }
+                // Notify the original player
+                if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Your power-up was attracted by ${magnetHolder.name}'s Magnet!`, timestamp: Date.now() }});
+                
+                // Remove MAGNET effect after use
+                setPlayers(prev => prev.map(pl => pl.id === magnetHolder.id ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'MAGNET') } : pl));
+              } else {
+                if (conn.open) {
+                  conn.send({ type: 'GIVE_POWER_UP', powerUp });
+                }
+              }
+            }
+          } else {
+            const hasBomb = p.activeEffects.some(e => e.type === 'BOMB' && e.endTime > Date.now());
+            points = -settingsRef.current.penaltyPoints;
+            if (hasBomb) {
+              points -= 500;
+              // Remove effect
+              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'BOMB') } : pl));
+            }
+          }
+          
+          if (conn.open) {
+            conn.send({
+              type: 'ANSWER_RESULT',
+              correct: isCorrect,
+              score: points,
+              correctAnswer: q.correctAnswer,
+              explanation: q.explanation
+            });
+          }
+          
+          return { ...p, hasAnswered: true, currentAnswer: data.answer, score: Math.max(0, p.score + points) };
+        }
+        return p;
+      }));
+    }
+
+    if (data.type === 'SUBMIT_EXAM') {
+      setPlayers(prev => prev.map(p => {
+        if (p.id === conn.peer && !p.hasAnswered) {
+          let totalScore = 0;
+          const questions = questionsRef.current;
+          const totalTime = questions.reduce((acc, q) => acc + q.timeLimit, 0);
+          
+          let correctAnswers = 0;
+          let wrongAnswers = 0;
+          questions.forEach(q => {
+            const answer = data.answers[q.id];
+            if (answer === q.correctAnswer) {
+              correctAnswers++;
+            } else if (answer) {
+              wrongAnswers++;
+            }
+          });
+
+          const timeBonus = Math.max(0, Math.round(1000 * ((totalTime - data.timeTaken) / totalTime)));
+          totalScore = (correctAnswers * 1000 * settingsRef.current.pointMultiplier) 
+                       - (wrongAnswers * settingsRef.current.penaltyPoints)
+                       + (correctAnswers > 0 ? timeBonus : 0);
+
+          return { ...p, hasAnswered: true, score: Math.max(0, totalScore), timeTaken: data.timeTaken };
+        }
+        return p;
+      }));
+    }
+
+    if (data.type === 'CHAT_MESSAGE') {
+      setMessages(prev => [...prev, data.message]);
+      broadcast(data);
+    }
+
+    if (data.type === 'USE_POWER_UP') {
+      const { powerUpId, targetId } = data;
+      const player = playersRef.current.find(p => p.id === conn.peer);
+      if (player) {
+        const powerUp = player.powerUps.find(pu => pu.id === powerUpId);
+        if (powerUp) {
+          // Remove power-up from player
+          setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
+          
+          if (powerUp.type === 'SHIELD' || powerUp.type === 'FREEZE' || powerUp.type === 'DOUBLE_POINTS' || powerUp.type === 'REVENGE' || powerUp.type === 'CLUE' || powerUp.type === 'REVEAL' || powerUp.type === 'MAGNET' || powerUp.type === 'FORCE_FIELD' || powerUp.type === 'STEALTH_MODE' || powerUp.type === 'MAGNET_SHIELD' || powerUp.type === 'CLARITY' || powerUp.type === 'SECOND_CHANCE' || powerUp.type === 'XRAY_VISION' || powerUp.type === 'MIND_READER') {
+            // Self-applied
+            const duration = (['SHIELD', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'MAGNET', 'FORCE_FIELD', 'STEALTH_MODE', 'MAGNET_SHIELD', 'XRAY_VISION', 'MIND_READER'].includes(powerUp.type) ? 30000 : 5000);
+            
+            if (powerUp.type === 'CLARITY') {
+              setPlayers(prev => prev.map(p => p.id === conn.peer ? { 
+                ...p, 
+                activeEffects: p.activeEffects.filter(e => !['LIGHTNING', 'FIREBALL', 'TORNADO', 'BOMB', 'BLINDING_BLAST', 'CONFUSION_CLOUD', 'GRAVITY_SWITCH', 'BLACKOUT', 'POISON', 'VAMPIRE', 'GRAVITY', 'INVERT', 'METEOR', 'HAMMER'].includes(e.type)) 
+              } : p));
+            } else {
+              setPlayers(prev => prev.map(p => p.id === conn.peer ? { 
+                ...p, 
+                activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + duration }] 
+              } : p));
+            }
+
+            if (conn.open) {
+              conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+            }
+
+            if (powerUp.type === 'REVEAL') {
+              // Calculate most popular answer
+              const answers: Record<string, number> = {};
+              playersRef.current.forEach(p => {
+                if (p.currentAnswer) {
+                  answers[p.currentAnswer] = (answers[p.currentAnswer] || 0) + 1;
+                }
+              });
+              const popular = Object.entries(answers).sort((a, b) => b[1] - a[1])[0];
+              const msg = popular ? `Popular answer: ${popular[0]} (${popular[1]} players)` : "No answers yet!";
+              if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+            }
+          } else if (powerUp.type === 'TIME_WARP') {
+            // Reset timer
+            const q = questionsRef.current[currentQuestionIndexRef.current];
+            if (q) {
+              setTimeLeft(q.timeLimit);
+            }
+          } else {
+            // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
+            const target = playersRef.current.find(p => p.id === targetId);
+            if (target) {
+              const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now());
+              const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now());
+              
+              if (hasMirror && powerUp.type !== 'THIEF') {
+                // Reflect back to sender
+                setPlayers(prev => prev.map(p => p.id === targetId ? { 
+                  ...p, 
+                  activeEffects: p.activeEffects.filter(e => e.type !== 'REVENGE') 
+                } : p));
+                
+                const msg = `Mirror reflected ${powerUp.type} back to ${player.name}!`;
+                if (conn.open) {
+                  conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+                  conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                }
+                return;
+              }
+
+              if (hasShield) {
+                // Remove shield and don't apply effect
+                setPlayers(prev => prev.map(p => p.id === targetId ? { 
+                  ...p, 
+                  activeEffects: p.activeEffects.filter(e => e.type !== 'SHIELD') 
+                } : p));
+                
+                // Notify both
+                const msg = `Shield blocked ${powerUp.type}!`;
+                if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                if (targetId !== 'host' && target.connection && target.connection.open) {
+                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                }
+                return;
+              }
+
+              if (powerUp.type === 'THIEF') {
+                if (target.powerUps.length > 0) {
+                  const randomIndex = Math.floor(Math.random() * target.powerUps.length);
+                  const stolenPowerUp = target.powerUps[randomIndex];
+                  setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, powerUps: p.powerUps.filter((_, i) => i !== randomIndex) } : p));
+                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: [...p.powerUps, stolenPowerUp] } : p));
+                  if (conn.open) conn.send({ type: 'GIVE_POWER_UP', powerUp: stolenPowerUp });
+                  
+                  const notifyMsg = `Your ${stolenPowerUp.type} was stolen by ${player.name}!`;
+                  if (targetId === 'host') {
+                    setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: notifyMsg, timestamp: Date.now() }]);
+                  } else if (target.connection && target.connection.open) {
+                    target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: notifyMsg, timestamp: Date.now() }});
+                  }
+                }
+              } else if (powerUp.type === 'MIRROR_MIND') {
+                if (target.currentAnswer) {
+                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, currentAnswer: target.currentAnswer, hasAnswered: true } : p));
+                  if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `You copied ${target.name}'s answer!`, timestamp: Date.now() }});
+                } else {
+                  if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `${target.name} hasn't answered yet!`, timestamp: Date.now() }});
+                }
+              } else if (powerUp.type === 'SABOTAGE') {
+                setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, currentAnswer: 'WRONG_ANSWER_SABOTAGED', hasAnswered: true } : p));
+                const msg = `Your answer was sabotaged by ${player.name}!`;
+                if (targetId === 'host') {
+                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
+                } else if (target.connection && target.connection.open) {
+                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                }
+              } else if (powerUp.type === 'SCORE_SWAP') {
+                const targetScore = target.score;
+                const myScore = player.score;
+                setPlayers(prev => prev.map(p => {
+                  if (p.id === targetId) return { ...p, score: myScore };
+                  if (p.id === conn.peer) return { ...p, score: targetScore };
+                  return p;
+                }));
+                const msg = `Your score was swapped with ${player.name}!`;
+                if (targetId === 'host') {
+                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
+                } else if (target.connection && target.connection.open) {
+                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                }
+              } else if (powerUp.type === 'CHAOS_DUPLICATOR') {
+                if (player.powerUps.length > 0) {
+                  const randomPU = player.powerUps[Math.floor(Math.random() * player.powerUps.length)];
+                  const newPU = { ...randomPU, id: Math.random().toString(36).substr(2, 9) };
+                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: [...p.powerUps, newPU] } : p));
+                  if (conn.open) conn.send({ type: 'GIVE_POWER_UP', powerUp: newPU });
+                }
+              } else if (powerUp.type === 'SHUFFLE' || powerUp.type === 'CONFUSION_CLOUD' || powerUp.type === 'TORNADO') {
+                if (targetId === 'host') {
+                  setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
+                } else if (target.connection && target.connection.open) {
+                  target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+                }
+              } else if (powerUp.type === 'ANSWER_LOCK') {
+                setPlayers(prev => prev.map(p => p.id === targetId ? { 
+                  ...p, 
+                  hasAnswered: true,
+                  currentAnswer: p.currentAnswer || 'LOCKED_NO_ANSWER' 
+                } : p));
+                const msg = `Your answer was locked by ${player.name}!`;
+                if (targetId === 'host') {
+                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
+                } else if (target.connection && target.connection.open) {
+                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+                }
+              } else if (targetId === 'host') {
+                setPlayers(prev => prev.map(p => p.id === 'host' ? { 
+                  ...p, 
+                  activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+                } : p));
+              } else if (target.connection && target.connection.open) {
+                target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  const SAMPLE_CSV = `ID;Question;Options(separated by |);Answer;Explanation
+1;What is the capital of France?;Paris|London|Berlin|Madrid;Paris;Paris is the capital and most populous city of France.
+2;Which planet is known as the Red Planet?;Mars|Venus|Jupiter|Saturn;Mars;Mars is often called the Red Planet because of iron oxide on its surface.
+3;What is the largest ocean on Earth?;Pacific Ocean|Atlantic Ocean|Indian Ocean|Arctic Ocean;Pacific Ocean;The Pacific Ocean is the largest and deepest of Earth's oceanic divisions.`;
+
+  const parseCSV = (text: string) => {
+    Papa.parse(text, {
+      header: true,
+      delimiter: ';',
+      skipEmptyLines: true,
+      complete: (results) => {
+        const parsedQuestions: Question[] = results.data.map((row: any, index) => {
+          const options = row['Options(separated by |)'] || row['Options'] || '';
+          return {
+            id: row.ID || `q-${index}`,
+            text: row.Question || '',
+            options: typeof options === 'string' ? options.split('|').map((o: string) => o.trim()) : [],
+            correctAnswer: row.Answer || '',
+            explanation: row.Explanation || '',
+            timeLimit: settings.timePerQuestion // Use global setting
+          };
+        }).filter(q => q.text && q.options.length > 0);
+        
+        if (parsedQuestions.length > 0) {
+          setQuestions(parsedQuestions);
+        } else {
+          alert('No valid questions found. Please check the format: ID;Question;Options(separated by |);Answer;Explanation');
+        }
+      },
+      error: (error) => {
+        console.error('CSV Parsing Error:', error);
+        alert('Error parsing CSV: ' + error.message);
+      }
+    });
+  };
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPlayers(prev => prev.map(p => ({
+        ...p,
+        activeEffects: p.activeEffects.filter(e => e.endTime > Date.now())
+      })));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Chaos Mode Events
+  useEffect(() => {
+    // Chaos mode now only enables lucky boxes
+  }, [gameState, settings.chaosMode]);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      parseCSV(text);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleTextLoad = () => {
+    if (!csvText.trim()) return;
+    parseCSV(csvText);
+  };
+
+  const loadSample = () => {
+    setCsvText(SAMPLE_CSV);
+    parseCSV(SAMPLE_CSV);
+  };
+
+  const handleHostJoin = () => {
+    if (!hostName.trim()) return;
+    const newPlayer: Player = {
+      id: 'host',
+      name: hostName.trim(),
+      score: 0,
+      hasAnswered: false,
+      currentAnswer: null,
+      connection: null as any,
+      powerUps: [],
+      activeEffects: [],
+      correctCount: 0,
+      isReady: true
+    };
+    setPlayers(prev => [...prev, newPlayer]);
+  };
+
+  const startGame = () => {
+    if (questions.length === 0) return alert('Please upload questions first');
+    if (players.length === 0) return alert('Waiting for players to join');
+
+    // Ensure host is a participant
+    if (!players.find(p => p.id === 'host')) {
+      const newPlayer: Player = {
+        id: 'host',
+        name: hostName.trim() || 'Host',
+        score: 0,
+        hasAnswered: false,
+        currentAnswer: null,
+        connection: null as any,
+        powerUps: [],
+        activeEffects: [],
+        correctCount: 0,
+        isReady: true
+      };
+      setPlayers(prev => [...prev, newPlayer]);
+    }
+    
+    let finalQuestions = [...questions];
+    
+    // Shuffle questions if enabled
+    if (settings.shuffleQuestions) {
+      finalQuestions = finalQuestions.sort(() => Math.random() - 0.5);
+    }
+    
+    // Shuffle options if enabled
+    if (settings.shuffleOptions) {
+      finalQuestions = finalQuestions.map(q => ({
+        ...q,
+        options: [...q.options].sort(() => Math.random() - 0.5)
+      }));
+    }
+    
+    setQuestions(finalQuestions);
+    setGameState('STARTING');
+    broadcast({ type: 'STATE_UPDATE', state: 'STARTING' });
+    
+    let countdown = 3;
+    const interval = setInterval(() => {
+      countdown--;
+      if (countdown <= 0) {
+        clearInterval(interval);
+        if (settingsRef.current.examType === 'QUICK') {
+          startQuickExam();
+        } else {
+          startQuestion(0);
+        }
+      }
+    }, 1000);
+  };
+
+  const startNewRound = () => {
+    setGameState('LOBBY');
+    setPlayers(prev => prev.map(p => ({ ...p, isReady: p.id === 'host' })));
+    broadcast({ type: 'NEW_ROUND' });
+  };
+
+  const startQuickExam = () => {
+    setGameState('QUICK_EXAM');
+    
+    // Reset player answers
+    setPlayers(prev => prev.map(p => ({ ...p, hasAnswered: false, currentAnswer: null, score: 0, timeTaken: 0 })));
+    
+    // Reset host quick exam state
+    setHostQuickCurrentIndex(0);
+    setHostQuickAnswers({});
+    setHostQuickSubmitted(false);
+    setShowHostControls(false);
+    
+    // Apply timePerQuestion setting to all questions if needed, or just calculate total time
+    const totalTime = questionsRef.current.reduce((acc, q) => acc + q.timeLimit, 0);
+    setTimeLeft(totalTime);
+    
+    broadcast({ 
+      type: 'STATE_UPDATE', 
+      state: 'QUICK_EXAM', 
+      data: { 
+        questions: questionsRef.current.map(q => ({ id: q.id, text: q.text, options: q.options, timeLimit: q.timeLimit })),
+        totalTime,
+        settings: settingsRef.current
+      } 
+    });
+
+    if (timerRef.current) clearInterval(timerRef.current);
+    
+    timerRef.current = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          handleQuickExamEnd();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  const handleQuickExamEnd = () => {
+    setGameState('LEADERBOARD');
+    broadcast({ 
+      type: 'STATE_UPDATE', 
+      state: 'LEADERBOARD',
+      data: {
+        leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score, timeTaken: p.timeTaken })).sort((a, b) => b.score - a.score),
+        fullQuestions: questionsRef.current // Send full questions including correct answers for review
+      }
+    });
+  };
+
+  const handleHostQuickAnswer = (answer: string) => {
+    if (hostQuickSubmitted) return;
+    const q = questions[hostQuickCurrentIndex];
+    setHostQuickAnswers(prev => ({ ...prev, [q.id]: answer }));
+  };
+
+  const submitHostQuickExam = (force = false) => {
+    if (hostQuickSubmitted && !force) return;
+    setHostQuickSubmitted(true);
+    
+    const timeTaken = questions.reduce((acc, q) => acc + q.timeLimit, 0) - timeLeft;
+    
+    let totalScore = 0;
+    let correctAnswers = 0;
+    const totalTime = questions.reduce((acc, q) => acc + q.timeLimit, 0);
+
+    questions.forEach(q => {
+      const answer = hostQuickAnswers[q.id];
+      if (answer === q.correctAnswer) {
+        correctAnswers++;
+      }
+    });
+
+    const timeBonus = Math.max(0, Math.round(1000 * ((totalTime - timeTaken) / totalTime)));
+    totalScore = (correctAnswers * 1000) + (correctAnswers > 0 ? timeBonus : 0);
+
+    setPlayers(prev => prev.map(p => {
+      if (p.id === 'host') {
+        return { ...p, hasAnswered: true, score: totalScore, timeTaken };
+      }
+      return p;
+    }));
+  };
+
+  const startQuestion = (index: number) => {
+    setCurrentQuestionIndex(index);
+    setGameState('QUESTION');
+    setShowAnswer(false);
+    
+    // Reset player answers
+    setPlayers(prev => prev.map(p => ({ ...p, hasAnswered: false, currentAnswer: null })));
+    
+    const q = questions[index];
+    setTimeLeft(q.timeLimit);
+    
+    broadcast({ 
+      type: 'STATE_UPDATE', 
+      state: 'QUESTION', 
+      data: { 
+        question: { text: q.text, options: q.options, timeLimit: q.timeLimit, id: q.id },
+        questionIndex: index,
+        totalQuestions: questions.length,
+        settings: settingsRef.current
+      } 
+    });
+
+    if (timerRef.current) clearInterval(timerRef.current);
+    
+    timerRef.current = setInterval(() => {
+      const anyFreeze = playersRef.current.some(p => p.activeEffects.some(e => e.type === 'FREEZE' && e.endTime > Date.now()));
+      if (anyFreeze) return;
+      
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+          handleQuestionEnd();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    // Initial shuffle for tornado effect if needed
+    setShuffledOptions([...q.options]);
+    setScissorsUsed(false);
+    isHandlingQuestionEndRef.current = false;
+  };
+
+  // Check if all players answered
+  useEffect(() => {
+    if (gameState === 'QUESTION' && players.length > 0 && players.every(p => p.hasAnswered)) {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+        handleQuestionEnd();
+      }
+    }
+    if (gameState === 'QUICK_EXAM' && players.length > 0) {
+      if (players.every(p => p.hasAnswered)) {
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+          handleQuickExamEnd();
+        }
+      }
+    }
+  }, [players, gameState]);
+
+  const handleQuestionEnd = () => {
+    if (isHandlingQuestionEndRef.current) return;
+    isHandlingQuestionEndRef.current = true;
+
+    setShowAnswer(true);
+    setScissorsUsed(false);
+    const q = questionsRef.current[currentQuestionIndexRef.current];
+    
+    // Update players state for those who didn't answer
+    setPlayers(prev => prev.map(p => p.hasAnswered ? p : { ...p, hasAnswered: true, currentAnswer: null }));
+
+    // Send result to players who didn't answer
+    playersRef.current.forEach(p => {
+      if (!p.hasAnswered && p.connection && p.connection.open) {
+        p.connection.send({
+          type: 'ANSWER_RESULT',
+          correct: false,
+          score: 0,
+          correctAnswer: q.correctAnswer,
+          explanation: q.explanation
+        });
+      }
+    });
+
+    if (nextQuestionTimerRef.current) clearTimeout(nextQuestionTimerRef.current);
+    // Move to next question after a short delay for visual feedback
+    nextQuestionTimerRef.current = setTimeout(() => {
+      const isLastQuestion = currentQuestionIndexRef.current + 1 >= questionsRef.current.length;
+      if (isLastQuestion) {
+        setGameState('LEADERBOARD');
+        broadcast({ 
+          type: 'STATE_UPDATE', 
+          state: 'LEADERBOARD',
+          data: {
+            leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
+            fullQuestions: questionsRef.current
+          }
+        });
+      } else {
+        startQuestion(currentQuestionIndexRef.current + 1);
+      }
+    }, 2000);
+  };
+
+  const nextPhase = () => {
+    if (nextQuestionTimerRef.current) clearTimeout(nextQuestionTimerRef.current);
+    
+    if (gameState === 'QUESTION') {
+      const isLastQuestion = currentQuestionIndex + 1 >= questions.length;
+      if (isLastQuestion) {
+        setGameState('LEADERBOARD');
+        broadcast({ 
+          type: 'STATE_UPDATE', 
+          state: 'LEADERBOARD',
+          data: {
+            leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
+            fullQuestions: questionsRef.current
+          }
+        });
+      } else {
+        startQuestion(currentQuestionIndex + 1);
+      }
+    } else if (gameState === 'LEADERBOARD') {
+      if (settings.examType === 'QUICK' || currentQuestionIndex + 1 >= questions.length) {
+        setGameState('FINISHED');
+        broadcast({ 
+          type: 'STATE_UPDATE', 
+          state: 'FINISHED',
+          data: {
+            leaderboard: playersRef.current.map(p => ({ id: p.id, name: p.name, score: p.score })).sort((a, b) => b.score - a.score),
+            fullQuestions: questionsRef.current
+          }
+        });
+      } else {
+        startQuestion(currentQuestionIndex + 1);
+      }
+    }
+  };
+
+  const copyRoomCode = () => {
+    navigator.clipboard.writeText(roomCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const sendChatMessage = () => {
+    if (!chatInput.trim()) return;
+    const hostPlayer = players.find(p => p.id === 'host');
+    const newMessage: ChatMessage = {
+      senderId: 'host',
+      senderName: hostPlayer?.name || 'Host',
+      text: chatInput.trim(),
+      timestamp: Date.now()
+    };
+    setMessages(prev => [...prev, newMessage]);
+    broadcast({ type: 'CHAT_MESSAGE', message: newMessage });
+    setChatInput('');
+  };
+
+  const usePowerUp = (powerUpId: string, targetId: string) => {
+    const host = players.find(p => p.id === 'host');
+    if (!host) return;
+    const powerUp = host.powerUps.find(pu => pu.id === powerUpId);
+    if (!powerUp) return;
+
+    // Remove from host
+    setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
+
+    // Apply effect
+    if (powerUp.type === 'SHIELD' || powerUp.type === 'FREEZE' || powerUp.type === 'DOUBLE_POINTS' || powerUp.type === 'REVENGE' || powerUp.type === 'CLUE' || powerUp.type === 'REVEAL' || powerUp.type === 'MAGNET' || powerUp.type === 'FORCE_FIELD' || powerUp.type === 'STEALTH_MODE' || powerUp.type === 'MAGNET_SHIELD' || powerUp.type === 'CLARITY' || powerUp.type === 'SECOND_CHANCE' || powerUp.type === 'XRAY_VISION' || powerUp.type === 'MIND_READER') {
+      // Self-applied
+      const duration = (['SHIELD', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'MAGNET', 'FORCE_FIELD', 'STEALTH_MODE', 'MAGNET_SHIELD', 'XRAY_VISION', 'MIND_READER'].includes(powerUp.type) ? 30000 : 5000);
+      
+      if (powerUp.type === 'CLARITY') {
+        setPlayers(prev => prev.map(p => p.id === 'host' ? { 
+          ...p, 
+          activeEffects: p.activeEffects.filter(e => !['LIGHTNING', 'FIREBALL', 'TORNADO', 'BOMB', 'BLINDING_BLAST', 'CONFUSION_CLOUD', 'GRAVITY_SWITCH', 'BLACKOUT', 'POISON', 'VAMPIRE', 'GRAVITY', 'INVERT', 'METEOR', 'HAMMER'].includes(e.type)) 
+        } : p));
+      } else {
+        setPlayers(prev => prev.map(p => p.id === 'host' ? { 
+          ...p, 
+          activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + duration }] 
+        } : p));
+      }
+
+      if (powerUp.type === 'REVEAL') {
+        const answers: Record<string, number> = {};
+        players.forEach(p => {
+          if (p.currentAnswer) {
+            answers[p.currentAnswer] = (answers[p.currentAnswer] || 0) + 1;
+          }
+        });
+        const popular = Object.entries(answers).sort((a, b) => b[1] - a[1])[0];
+        const msg = popular ? `Popular answer: ${popular[0]} (${popular[1]} players)` : "No answers yet!";
+        setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
+      }
+    } else if (powerUp.type === 'TIME_WARP') {
+      // Reset timer
+      const q = questions[currentQuestionIndex];
+      if (q) {
+        setTimeLeft(q.timeLimit);
+      }
+    } else {
+      // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
+      const target = players.find(p => p.id === targetId);
+      if (target) {
+        const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now());
+        const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now());
+
+        if (hasMirror && powerUp.type !== 'THIEF') {
+          // Reflect back to host
+          setPlayers(prev => prev.map(p => p.id === targetId ? { 
+            ...p, 
+            activeEffects: p.activeEffects.filter(e => e.type !== 'REVENGE') 
+          } : p));
+          
+          setPlayers(prev => prev.map(p => p.id === 'host' ? { 
+            ...p, 
+            activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+          } : p));
+          
+          const msg = `Revenge reflected ${powerUp.type} back to the Host!`;
+          if (targetId !== 'host' && target.connection && target.connection.open) {
+            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+          }
+          return;
+        }
+
+        if (hasShield) {
+          // Remove shield and don't apply effect
+          setPlayers(prev => prev.map(p => p.id === targetId ? { 
+            ...p, 
+            activeEffects: p.activeEffects.filter(e => e.type !== 'SHIELD') 
+          } : p));
+          
+          // Notify both
+          const msg = `Shield blocked ${powerUp.type}!`;
+          if (targetId !== 'host' && target.connection && target.connection.open) {
+            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+          }
+          return;
+        }
+
+        if (powerUp.type === 'THIEF') {
+          if (target.powerUps.length > 0) {
+            const randomIndex = Math.floor(Math.random() * target.powerUps.length);
+            const stolenPowerUp = target.powerUps[randomIndex];
+            setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, powerUps: p.powerUps.filter((_, i) => i !== randomIndex) } : p));
+            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, stolenPowerUp] } : p));
+            if (targetId !== 'host' && target.connection && target.connection.open) {
+              target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Your ${stolenPowerUp.type} was stolen by the Host!`, timestamp: Date.now() }});
+            }
+          }
+        } else if (powerUp.type === 'MIRROR_MIND') {
+          if (target.currentAnswer) {
+            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, currentAnswer: target.currentAnswer, hasAnswered: true } : p));
+            setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `You copied ${target.name}'s answer!`, timestamp: Date.now() }]);
+          } else {
+            setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `${target.name} hasn't answered yet!`, timestamp: Date.now() }]);
+          }
+        } else if (powerUp.type === 'SABOTAGE') {
+          setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, currentAnswer: 'WRONG_ANSWER_SABOTAGED', hasAnswered: true } : p));
+          const msg = `Your answer was sabotaged by the Host!`;
+          if (target.connection && target.connection.open) {
+            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+          }
+        } else if (powerUp.type === 'SCORE_SWAP') {
+          const targetScore = target.score;
+          const hostScore = host.score;
+          setPlayers(prev => prev.map(p => {
+            if (p.id === targetId) return { ...p, score: hostScore };
+            if (p.id === 'host') return { ...p, score: targetScore };
+            return p;
+          }));
+          const msg = `Your score was swapped with the Host!`;
+          if (target.connection && target.connection.open) {
+            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+          }
+        } else if (powerUp.type === 'CHAOS_DUPLICATOR') {
+          if (host.powerUps.length > 0) {
+            const randomPU = host.powerUps[Math.floor(Math.random() * host.powerUps.length)];
+            const newPU = { ...randomPU, id: Math.random().toString(36).substr(2, 9) };
+            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, newPU] } : p));
+          }
+        } else if (powerUp.type === 'SHUFFLE' || powerUp.type === 'CONFUSION_CLOUD' || powerUp.type === 'TORNADO') {
+          if (targetId === 'host') {
+            setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
+          } else if (target.connection && target.connection.open) {
+            target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+          }
+        } else if (powerUp.type === 'ANSWER_LOCK') {
+          setPlayers(prev => prev.map(p => p.id === targetId ? { 
+            ...p, 
+            hasAnswered: true,
+            currentAnswer: p.currentAnswer || 'LOCKED_NO_ANSWER' 
+          } : p));
+          const msg = `Your answer was locked by the Host!`;
+          if (target.connection && target.connection.open) {
+            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
+          }
+        } else if (targetId === 'host') {
+          setPlayers(prev => prev.map(p => p.id === 'host' ? { 
+            ...p, 
+            activeEffects: [...p.activeEffects, { type: powerUp.type, endTime: Date.now() + 5000 }] 
+          } : p));
+        } else if (target.connection && target.connection.open) {
+          target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type });
+        }
+      }
+    }
+    setShowTargetList(null);
+  };
+
+  const useScissors = (powerUpId: string) => {
+    const host = players.find(p => p.id === 'host');
+    if (!host) return;
+    const powerUp = host.powerUps.find(pu => pu.id === powerUpId && pu.type === 'SCISSORS');
+    if (!powerUp) return;
+
+    setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
+    setScissorsUsed(true);
+  };
+
+  const openLuckyBlock = () => {
+    if (pendingPowerUp) {
+      setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, pendingPowerUp] } : p));
+      setPendingPowerUp(null);
+      setShowLuckyBlock(false);
+    }
+  };
+
+  const copyAIPrompt = () => {
+    const prompt = `Please generate a quiz in CSV format for my exam platform. 
+The format MUST follow these rules:
+1. Use a semicolon (;) as the delimiter.
+2. The columns must be: ID;Question;Options(separated by |);Answer;Explanation
+3. The 'Options' column must contain 4 choices separated by a pipe (|).
+4. The 'Answer' must exactly match one of the options.
+5. Provide a brief explanation for the correct answer.
+
+Example row:
+1;What is the capital of France?;Paris|London|Berlin|Madrid;Paris;Paris is the capital and most populous city of France.
+
+Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
+    
+    navigator.clipboard.writeText(prompt);
+    setPromptCopied(true);
+    setTimeout(() => setPromptCopied(false), 2000);
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-50 flex flex-col">
+      <header className="p-6 flex items-center justify-between border-b border-white/5">
+        <button onClick={onBack} className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors">
+          <ArrowLeft className="w-4 h-4" /> Exit
+        </button>
+        <div className="flex items-center gap-4">
+          <div className="text-sm text-zinc-400">Room Code</div>
+          <div className="flex items-center gap-2 bg-zinc-900 px-4 py-2 rounded-lg border border-white/10">
+            <span className="font-mono text-2xl font-bold tracking-widest text-indigo-400">{roomCode || '...'}</span>
+            <button onClick={copyRoomCode} className="text-zinc-400 hover:text-white ml-2">
+              {copied ? <Check className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 flex flex-col items-center justify-center p-6">
+        {gameState === 'LOBBY' && (
+          <div className="w-full max-w-4xl grid md:grid-cols-2 gap-12">
+            <div className="space-y-8">
+              <div>
+                <h2 className="text-3xl font-bold mb-2">Host a Game</h2>
+                <p className="text-zinc-400">Upload your questions and wait for players to join.</p>
+              </div>
+
+              <div className="bg-zinc-900/50 border border-white/10 rounded-2xl p-6">
+                <h3 className="text-lg font-medium mb-4 flex items-center justify-center gap-2">
+                  <Upload className="w-5 h-5 text-zinc-400" />
+                  Load Questions (CSV)
+                </h3>
+                <div className="space-y-4">
+                  <label className="cursor-pointer block w-full bg-white text-black px-4 py-3 rounded-xl font-medium text-center hover:bg-zinc-200 transition-colors">
+                    Upload CSV File
+                    <input type="file" accept=".csv" className="hidden" onChange={handleFileUpload} />
+                  </label>
+                  
+                  <div className="flex items-center gap-4 text-sm text-zinc-500">
+                    <div className="flex-1 h-px bg-white/10"></div>
+                    OR PASTE TEXT
+                    <div className="flex-1 h-px bg-white/10"></div>
+                  </div>
+                  
+                  <textarea 
+                    className="w-full bg-zinc-950 border border-white/10 rounded-xl p-3 text-sm font-mono text-zinc-300 h-32 focus:outline-none focus:border-indigo-500 transition-colors"
+                    placeholder="ID;Question;Options(separated by |);Answer;Explanation&#10;1;What is 2+2?;3|4|5|6;4;Basic addition"
+                    value={csvText}
+                    onChange={e => setCsvText(e.target.value)}
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={handleTextLoad}
+                      disabled={!csvText.trim()}
+                      className="bg-zinc-800 text-white px-4 py-3 rounded-xl font-medium hover:bg-zinc-700 disabled:opacity-50 transition-colors"
+                    >
+                      Load from Text
+                    </button>
+                    <button 
+                      onClick={loadSample}
+                      className="bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 px-4 py-3 rounded-xl font-medium hover:bg-indigo-600/30 transition-colors"
+                    >
+                      Load Sample
+                    </button>
+                  </div>
+                  <button 
+                    onClick={copyAIPrompt}
+                    className="w-full mt-2 flex items-center justify-center gap-2 bg-zinc-800/50 border border-white/5 text-zinc-400 hover:text-white hover:bg-zinc-800 px-4 py-3 rounded-xl font-medium transition-all"
+                  >
+                    {promptCopied ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-400" />
+                        Prompt Copied!
+                      </>
+                    ) : (
+                      <>
+                        <MessageSquare className="w-4 h-4" />
+                        Copy AI Prompt Template
+                      </>
+                    )}
+                  </button>
+                </div>
+                {questions.length > 0 && (
+                  <div className="mt-4 text-emerald-400 flex items-center justify-center gap-2 bg-emerald-500/10 py-2 rounded-lg">
+                    <CheckCircle2 className="w-4 h-4" />
+                    {questions.length} questions loaded
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-zinc-900/50 border border-white/10 rounded-2xl p-6">
+                <h3 className="text-lg font-medium mb-4">Game Settings</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Exam Type</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => setSettings({ ...settings, examType: 'NORMAL' })}
+                        className={clsx(
+                          "py-2 px-4 rounded-xl text-sm font-medium transition-colors border",
+                          settings.examType === 'NORMAL' 
+                            ? "bg-indigo-600 border-indigo-500 text-white" 
+                            : "bg-zinc-800 border-white/10 text-zinc-400 hover:bg-zinc-700"
+                        )}
+                      >
+                        Normal (Host Controlled)
+                      </button>
+                      <button
+                        onClick={() => setSettings({ ...settings, examType: 'QUICK' })}
+                        className={clsx(
+                          "py-2 px-4 rounded-xl text-sm font-medium transition-colors border",
+                          settings.examType === 'QUICK' 
+                            ? "bg-indigo-600 border-indigo-500 text-white" 
+                            : "bg-zinc-800 border-white/10 text-zinc-400 hover:bg-zinc-700"
+                        )}
+                      >
+                        Quick (Self-Paced)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Time Limit (sec)</label>
+                      <input 
+                        type="number" 
+                        value={settings.timePerQuestion}
+                        onChange={e => setSettings({ ...settings, timePerQuestion: parseInt(e.target.value) || 20 })}
+                        className="w-full bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                      />
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <label className="flex items-center gap-3 cursor-pointer group">
+                        <div className="relative">
+                          <input 
+                            type="checkbox" 
+                            className="sr-only" 
+                            checked={settings.shuffleQuestions}
+                            onChange={e => setSettings({ ...settings, shuffleQuestions: e.target.checked })}
+                          />
+                          <div className={clsx(
+                            "w-10 h-6 rounded-full transition-colors",
+                            settings.shuffleQuestions ? "bg-indigo-600" : "bg-zinc-800"
+                          )}></div>
+                          <div className={clsx(
+                            "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
+                            settings.shuffleQuestions ? "translate-x-4" : "translate-x-0"
+                          )}></div>
+                        </div>
+                        <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">Shuffle Questions</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <div className="relative">
+                        <input 
+                          type="checkbox" 
+                          className="sr-only" 
+                          checked={settings.shuffleOptions}
+                          onChange={e => setSettings({ ...settings, shuffleOptions: e.target.checked })}
+                        />
+                        <div className={clsx(
+                          "w-10 h-6 rounded-full transition-colors",
+                          settings.shuffleOptions ? "bg-indigo-600" : "bg-zinc-800"
+                        )}></div>
+                        <div className={clsx(
+                          "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
+                          settings.shuffleOptions ? "translate-x-4" : "translate-x-0"
+                        )}></div>
+                      </div>
+                      <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">Shuffle Options</span>
+                    </label>
+
+                    {settings.examType === 'NORMAL' ? (
+                      <label className="flex items-center gap-3 cursor-pointer group">
+                        <div className="relative">
+                          <input 
+                            type="checkbox" 
+                            className="sr-only" 
+                            checked={settings.showCorrectAnswer}
+                            onChange={e => setSettings({ ...settings, showCorrectAnswer: e.target.checked })}
+                          />
+                          <div className={clsx(
+                            "w-10 h-6 rounded-full transition-colors",
+                            settings.showCorrectAnswer ? "bg-indigo-600" : "bg-zinc-800"
+                          )}></div>
+                          <div className={clsx(
+                            "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
+                            settings.showCorrectAnswer ? "translate-x-4" : "translate-x-0"
+                          )}></div>
+                        </div>
+                        <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">Show Answers</span>
+                      </label>
+                    ) : (
+                      <label className="flex items-center gap-3 cursor-pointer group">
+                        <div className="relative">
+                          <input 
+                            type="checkbox" 
+                            className="sr-only" 
+                            checked={settings.canSkipQuestions}
+                            onChange={e => setSettings({ ...settings, canSkipQuestions: e.target.checked })}
+                          />
+                          <div className={clsx(
+                            "w-10 h-6 rounded-full transition-colors",
+                            settings.canSkipQuestions ? "bg-indigo-600" : "bg-zinc-800"
+                          )}></div>
+                          <div className={clsx(
+                            "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
+                            settings.canSkipQuestions ? "translate-x-4" : "translate-x-0"
+                          )}></div>
+                        </div>
+                        <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">Allow Navigation</span>
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 pt-2 border-t border-white/5">
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <div className="relative">
+                        <input 
+                          type="checkbox" 
+                          className="sr-only" 
+                          checked={settings.chaosMode}
+                          onChange={e => setSettings({ ...settings, chaosMode: e.target.checked })}
+                        />
+                        <div className={clsx(
+                          "w-10 h-6 rounded-full transition-colors",
+                          settings.chaosMode ? "bg-orange-600" : "bg-zinc-800"
+                        )}></div>
+                        <div className={clsx(
+                          "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
+                          settings.chaosMode ? "translate-x-4" : "translate-x-0"
+                        )}></div>
+                      </div>
+                      <span className="text-sm font-bold text-orange-400 group-hover:text-orange-300 transition-colors uppercase tracking-tighter flex items-center gap-1">
+                        <Flame className="w-3 h-3" /> Chaos Mode
+                      </span>
+                    </label>
+
+                    {settings.chaosMode && (
+                      <div className="col-span-2 mt-4 space-y-4 pt-4 border-t border-white/10">
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Chaos Intensity</label>
+                          <select 
+                            value={settings.chaosIntensity}
+                            onChange={e => setSettings({ ...settings, chaosIntensity: e.target.value as 'MILD' | 'WILD' | 'INSANE' })}
+                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            <option value="MILD">Mild</option>
+                            <option value="WILD">Wild</option>
+                            <option value="INSANE">Insane</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Power-up Frequency</label>
+                          <select 
+                            value={settings.powerUpFrequency}
+                            onChange={e => setSettings({ ...settings, powerUpFrequency: e.target.value as 'RARE' | 'NORMAL' | 'FREQUENT' })}
+                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                          >
+                            <option value="RARE">Rare</option>
+                            <option value="NORMAL">Normal</option>
+                            <option value="FREQUENT">Frequent</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium">Allow Stacking Powers</label>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={settings.allowStacking}
+                              onChange={e => setSettings({ ...settings, allowStacking: e.target.checked })}
+                              className="sr-only peer"
+                            />
+                            <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
+                          </label>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Max Active Powers</label>
+                          <input 
+                            type="number"
+                            min="1"
+                            max="5"
+                            value={settings.maxActivePowers}
+                            onChange={e => setSettings({ ...settings, maxActivePowers: parseInt(e.target.value) || 3 })}
+                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Chaos Duration Multiplier ({settings.chaosDurationMultiplier}x)</label>
+                          <input 
+                            type="range"
+                            min="0.5"
+                            max="2"
+                            step="0.1"
+                            value={settings.chaosDurationMultiplier}
+                            onChange={e => setSettings({ ...settings, chaosDurationMultiplier: parseFloat(e.target.value) || 1 })}
+                            className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-600"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium">Auto-balance Teams</label>
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={settings.autoBalance}
+                              onChange={e => setSettings({ ...settings, autoBalance: e.target.checked })}
+                              className="sr-only peer"
+                            />
+                            <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
+                          </label>
+                        </div>
+                        <div className="pt-4 border-t border-white/10">
+                          <label className="block text-sm font-medium mb-3">Power Catalog</label>
+                          <PowerCatalog 
+                            configs={settings.powerUpConfigs} 
+                            onUpdate={(id, config) => setSettings({
+                              ...settings,
+                              powerUpConfigs: { ...settings.powerUpConfigs, [id]: config }
+                            })}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Point Multiplier</label>
+                      <select 
+                        value={settings.pointMultiplier}
+                        onChange={e => setSettings({ ...settings, pointMultiplier: parseFloat(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="0.5">0.5x (Easy)</option>
+                        <option value="1">1x (Standard)</option>
+                        <option value="1.5">1.5x (Hard)</option>
+                        <option value="2">2x (Pro)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Penalty Points</label>
+                      <select 
+                        value={settings.penaltyPoints}
+                        onChange={e => setSettings({ ...settings, penaltyPoints: parseInt(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="0">None</option>
+                        <option value="250">Low (-250)</option>
+                        <option value="500">Medium (-500)</option>
+                        <option value="1000">High (-1000)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-zinc-900/50 border border-white/10 rounded-2xl p-6">
+                <h3 className="text-lg font-medium mb-4">Join as Player</h3>
+                {!players.some(p => p.id === 'host') ? (
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      placeholder="Your Nickname" 
+                      value={hostName}
+                      onChange={e => setHostName(e.target.value)}
+                      className="flex-1 bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                    <button 
+                      onClick={handleHostJoin}
+                      disabled={!hostName.trim()}
+                      className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-medium hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                    >
+                      Join
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-emerald-400 flex items-center gap-2 bg-emerald-500/10 py-3 px-4 rounded-xl">
+                    <CheckCircle2 className="w-5 h-5" />
+                    Joined as <span className="font-bold text-white">{players.find(p => p.id === 'host')?.name}</span>
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={startGame}
+                disabled={questions.length === 0 || players.length === 0}
+                className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all"
+              >
+                <Play className="w-6 h-6" />
+                Start Game
+              </button>
+            </div>
+
+            <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6 flex flex-col h-[600px]">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold flex items-center gap-2">
+                  <Users className="w-5 h-5 text-indigo-400" />
+                  Players ({players.length})
+                </h3>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto mb-6 pr-2 custom-scrollbar">
+                {players.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4">
+                    <Loader2 className="w-8 h-8 animate-spin" />
+                    <p>Waiting for players to join...</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    <AnimatePresence>
+                      {players.map(p => (
+                        <motion.div
+                          key={p.id}
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.9 }}
+                          className="bg-zinc-800/50 border border-white/5 rounded-lg p-3 flex items-center justify-between gap-3"
+                        >
+                          <div className="flex items-center gap-3 overflow-hidden">
+                            <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-300 font-bold flex-shrink-0">
+                              {p.name.charAt(0).toUpperCase()}
+                            </div>
+                            <span className="font-medium truncate">{p.name}</span>
+                            {p.id === 'host' && <span className="text-[8px] bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded-full uppercase font-bold tracking-wider flex-shrink-0">Host</span>}
+                          </div>
+                          {p.isReady ? (
+                            <span className="text-emerald-400 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider flex-shrink-0">
+                              <CheckCircle2 className="w-3 h-3" /> Ready
+                            </span>
+                          ) : (
+                            <span className="text-zinc-500 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider flex-shrink-0">
+                              <Loader2 className="w-3 h-3 animate-spin" /> Wait
+                            </span>
+                          )}
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t border-white/5 pt-6 flex flex-col h-1/2">
+                <h3 className="text-lg font-bold flex items-center gap-2 mb-4">
+                  <MessageSquare className="w-5 h-5 text-indigo-400" />
+                  Lobby Chat
+                </h3>
+                
+                <div className="flex-1 overflow-y-auto space-y-3 mb-4 pr-2 custom-scrollbar flex flex-col-reverse">
+                  <div className="space-y-3">
+                    {messages.length === 0 ? (
+                      <div className="text-center py-4 text-zinc-600 text-sm italic">
+                        No messages yet. Say hello!
+                      </div>
+                    ) : (
+                      messages.map((msg, i) => (
+                        <div key={i} className={clsx(
+                          "flex flex-col",
+                          msg.senderId === 'host' ? "items-end" : "items-start"
+                        )}>
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">{msg.senderName}</span>
+                            <span className="text-[10px] text-zinc-600">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
+                          <div className={clsx(
+                            "px-3 py-2 rounded-2xl text-sm max-w-[85%] break-words",
+                            msg.senderId === 'host' 
+                              ? "bg-indigo-600 text-white rounded-tr-none" 
+                              : "bg-zinc-800 text-zinc-200 rounded-tl-none"
+                          )}>
+                            {msg.text}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    placeholder="Type a message..." 
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
+                    className="flex-1 bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                  <button 
+                    onClick={sendChatMessage}
+                    disabled={!chatInput.trim()}
+                    className="bg-indigo-600 text-white p-2 rounded-xl hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                  >
+                    <Send className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {gameState === 'STARTING' && (
+          <motion.div
+            initial={{ scale: 0.5, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="text-center"
+          >
+            <h2 className="text-6xl font-bold mb-4">Get Ready!</h2>
+            <p className="text-2xl text-zinc-400">Look at the screen</p>
+          </motion.div>
+        )}
+
+        {gameState === 'QUESTION' && questions[currentQuestionIndex] && (
+          <div className="w-full max-w-6xl flex flex-col items-center relative">
+            {settings.chaosMode && (
+              <div className="absolute -top-12 left-1/2 -translate-x-1/2 z-20">
+                <motion.div 
+                  animate={{ scale: [1, 1.1, 1] }}
+                  transition={{ repeat: Infinity, duration: 2 }}
+                  className="bg-orange-600/20 border border-orange-500/50 text-orange-400 px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-[0.3em] flex items-center gap-2 shadow-[0_0_15px_rgba(234,88,12,0.3)] whitespace-nowrap"
+                >
+                  <Flame className="w-3 h-3" /> Chaos Mode Active <Flame className="w-3 h-3" />
+                </motion.div>
+              </div>
+            )}
+            {/* Power-ups UI for Host */}
+            {players.find(p => p.id === 'host') && (
+              <div className="fixed bottom-24 right-6 z-50 flex flex-col items-end gap-3">
+                <AnimatePresence>
+                  {showLuckyBlock && (
+                    <motion.button
+                      initial={{ scale: 0, rotate: -180 }}
+                      animate={{ scale: 1, rotate: 0 }}
+                      exit={{ scale: 0, rotate: 180 }}
+                      onClick={openLuckyBlock}
+                      className="w-16 h-16 bg-yellow-500 rounded-2xl flex items-center justify-center shadow-[0_0_20px_rgba(234,179,8,0.5)] border-4 border-yellow-400 animate-bounce"
+                    >
+                      <Box className="w-8 h-8 text-white" />
+                    </motion.button>
+                  )}
+
+                  {players.find(p => p.id === 'host')?.powerUps.map((pu) => (
+                    <div key={pu.id} className="relative group">
+                      <motion.button
+                        initial={{ x: 50, opacity: 0 }}
+                        animate={{ x: 0, opacity: 1 }}
+                        className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg border-2 transition-all hover:scale-110"
+                        style={{ 
+                          backgroundColor: 
+                            pu.type === 'SCISSORS' ? '#4f46e5' : 
+                            pu.type === 'LIGHTNING' ? '#eab308' : 
+                            pu.type === 'FIREBALL' ? '#ef4444' : 
+                            pu.type === 'TORNADO' ? '#10b981' :
+                            pu.type === 'SHIELD' ? '#3b82f6' :
+                            pu.type === 'FREEZE' ? '#06b6d4' :
+                            pu.type === 'DOUBLE_POINTS' ? '#a855f7' : 
+                            pu.type === 'TIME_WARP' ? '#6366f1' :
+                            pu.type === 'REVENGE' ? '#ec4899' :
+                            pu.type === 'BOMB' ? '#18181b' :
+                            pu.type === 'CLUE' ? '#84cc16' :
+                            pu.type === 'REVEAL' ? '#f59e0b' :
+                            pu.type === 'MAGNET' ? '#64748b' :
+                            pu.type === 'SHUFFLE' ? '#7c3aed' : '#f97316',
+                          borderColor: 'rgba(255,255,255,0.2)'
+                        }}
+                        onClick={() => {
+                          if (pu.type === 'SCISSORS') {
+                            useScissors(pu.id);
+                          } else if (['SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'REVEAL', 'MAGNET', 'TIME_WARP'].includes(pu.type)) {
+                            usePowerUp(pu.id, 'host');
+                          } else {
+                            setShowTargetList(showTargetList === pu.id ? null : pu.id);
+                          }
+                        }}
+                      >
+                        {pu.type === 'SCISSORS' && <Scissors className="w-7 h-7 text-white" />}
+                        {pu.type === 'LIGHTNING' && <Zap className="w-7 h-7 text-white" />}
+                        {pu.type === 'FIREBALL' && <Flame className="w-7 h-7 text-white" />}
+                        {pu.type === 'TORNADO' && <Wind className="w-7 h-7 text-white" />}
+                        {pu.type === 'SHIELD' && <Shield className="w-7 h-7 text-white" />}
+                        {pu.type === 'FREEZE' && <Snowflake className="w-7 h-7 text-white" />}
+                        {pu.type === 'DOUBLE_POINTS' && <TrendingUp className="w-7 h-7 text-white" />}
+                        {pu.type === 'THIEF' && <Hand className="w-7 h-7 text-white" />}
+                        {pu.type === 'TIME_WARP' && <RotateCcw className="w-7 h-7 text-white" />}
+                        {pu.type === 'REVENGE' && <RefreshCw className="w-7 h-7 text-white" />}
+                        {pu.type === 'BOMB' && <Bomb className="w-7 h-7 text-white" />}
+                        {pu.type === 'CLUE' && <Lightbulb className="w-7 h-7 text-white" />}
+                        {pu.type === 'REVEAL' && <Eye className="w-7 h-7 text-white" />}
+                        {pu.type === 'MAGNET' && <Magnet className="w-7 h-7 text-white" />}
+                        {pu.type === 'SHUFFLE' && <Shuffle className="w-7 h-7 text-white" />}
+                      </motion.button>
+
+                      {showTargetList === pu.id && (
+                        <motion.div 
+                          initial={{ opacity: 0, scale: 0.9, x: -10 }}
+                          animate={{ opacity: 1, scale: 1, x: 0 }}
+                          className="absolute right-16 bottom-0 bg-zinc-900 border border-white/10 rounded-xl p-2 shadow-2xl min-w-[150px]"
+                        >
+                          <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
+                            <Target className="w-3 h-3" /> Use on:
+                          </div>
+                          <div className="space-y-1">
+                            {players.map(p => (
+                              <button
+                                key={p.id}
+                                onClick={() => usePowerUp(pu.id, p.id)}
+                                className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-white/5 transition-colors flex items-center justify-between group"
+                              >
+                                <span className="truncate">{p.name}</span>
+                                {p.id === 'host' && <span className="text-[8px] opacity-50 ml-1">You</span>}
+                              </button>
+                            ))}
+                          </div>
+                        </motion.div>
+                      )}
+                    </div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            )}
+
+            <div className="w-full flex items-center justify-between mb-8">
+              <span className="inline-block px-5 py-2 rounded-full bg-white/10 text-white/70 font-medium tracking-widest uppercase">
+                Question {currentQuestionIndex + 1} of {questions.length}
+              </span>
+              <div className={clsx(
+                "w-20 h-20 rounded-full flex items-center justify-center text-3xl font-bold border-4 shadow-xl relative",
+                timeLeft <= 5 ? "border-red-500 text-red-500 bg-red-500/10 animate-pulse" : "border-indigo-500 text-indigo-400 bg-indigo-500/10"
+              )}>
+                {timeLeft}
+                {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now()) && (
+                  <motion.div 
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className="absolute -top-2 -right-2 bg-purple-600 text-white text-[10px] font-bold px-2 py-1 rounded-full shadow-lg flex items-center gap-1"
+                  >
+                    <TrendingUp className="w-3 h-3" /> 2X
+                  </motion.div>
+                )}
+              </div>
+            </div>
+
+            <div className="w-full bg-zinc-900 border border-white/10 rounded-[3rem] p-10 md:p-16 shadow-2xl mb-8 relative overflow-hidden">
+              {/* Lightning Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'LIGHTNING' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 bg-zinc-950 z-10 flex flex-col items-center justify-center text-yellow-400 animate-pulse">
+                  <Zap className="w-20 h-20 mb-4" />
+                  <h3 className="text-2xl font-bold uppercase tracking-widest">Blinded by Lightning!</h3>
+                </div>
+              )}
+
+              {/* Freeze Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FREEZE' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 bg-cyan-500/10 z-10 pointer-events-none border-4 border-cyan-400/30 rounded-[3rem] backdrop-blur-[1px]">
+                  <div className="absolute top-4 right-4 text-cyan-400 animate-pulse">
+                    <Snowflake className="w-10 h-10" />
+                  </div>
+                </div>
+              )}
+
+              {/* Shield Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'SHIELD' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-10 pointer-events-none border-4 border-blue-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(59,130,246,0.2)]">
+                  <div className="absolute top-4 left-4 text-blue-400">
+                    <Shield className="w-8 h-8" />
+                  </div>
+                </div>
+              )}
+
+              {/* Revenge Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'REVENGE' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-10 pointer-events-none border-4 border-pink-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(236,72,153,0.2)]">
+                  <div className="absolute bottom-4 right-4 text-pink-400 animate-spin-slow">
+                    <RefreshCw className="w-10 h-10" />
+                  </div>
+                </div>
+              )}
+
+              {/* Magnet Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'MAGNET' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-10 pointer-events-none">
+                  <div className="absolute top-4 right-16 text-slate-400 animate-bounce">
+                    <Magnet className="w-8 h-8" />
+                  </div>
+                </div>
+              )}
+
+              {/* Clue Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'CLUE' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-10 pointer-events-none bg-lime-500/5">
+                  <div className="absolute bottom-4 left-4 text-lime-400">
+                    <Lightbulb className="w-8 h-8" />
+                  </div>
+                </div>
+              )}
+
+              {/* Bomb Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'BOMB' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-10 pointer-events-none bg-red-900/10 rounded-[3rem]">
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-ping">
+                    <Bomb className="w-32 h-32" />
+                  </div>
+                </div>
+              )}
+
+              <div className="absolute top-0 left-0 w-full h-2 bg-white/5">
+                <motion.div 
+                  className="h-full bg-indigo-500"
+                  initial={{ width: '100%' }}
+                  animate={{ width: `${(timeLeft / questions[currentQuestionIndex].timeLimit) * 100}%` }}
+                  transition={{ duration: 1, ease: "linear" }}
+                />
+              </div>
+              <h2 className="text-4xl md:text-6xl font-medium text-center leading-tight">
+                {questions[currentQuestionIndex].text}
+              </h2>
+            </div>
+
+            {showAnswer && questions[currentQuestionIndex].explanation && (
+              <motion.div 
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full max-w-4xl bg-indigo-500/10 border border-indigo-500/30 p-6 rounded-2xl mb-8 text-center"
+              >
+                <h4 className="text-indigo-400 font-bold uppercase tracking-widest text-xs mb-2">Explanation</h4>
+                <p className="text-zinc-200 text-lg italic leading-relaxed">
+                  {questions[currentQuestionIndex].explanation}
+                </p>
+              </motion.div>
+            )}
+
+            <div className="w-full grid md:grid-cols-2 gap-6 mb-12 relative">
+              {/* Fireball Effect */}
+              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FIREBALL' && e.endTime > Date.now()) && (
+                <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden rounded-3xl">
+                  <div className="absolute inset-0 bg-orange-600/20 mix-blend-overlay" />
+                  {[...Array(10)].map((_, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ y: 500, opacity: 0 }}
+                      animate={{ y: -500, opacity: [0, 1, 0] }}
+                      transition={{ duration: 2, repeat: Infinity, delay: i * 0.2 }}
+                      className="absolute bottom-0 text-orange-500"
+                      style={{ left: `${i * 10}%` }}
+                    >
+                      <Flame className="w-20 h-20" />
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+
+              {(players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'TORNADO' && e.endTime > Date.now()) 
+                ? shuffledOptions 
+                : questions[currentQuestionIndex].options
+              ).map((opt, i) => {
+                const q = questions[currentQuestionIndex];
+                const isCorrect = showAnswer && opt === q.correctAnswer;
+                
+                const hostPlayer = players.find(p => p.id === 'host');
+                const isHostPlayer = !!hostPlayer;
+                const hostHasAnswered = hostPlayer?.hasAnswered;
+                const isHostSelected = hostPlayer?.currentAnswer === opt;
+
+                // Scissors effect: hide 2 wrong answers
+                const isWrong = opt !== q.correctAnswer;
+                const wrongOptions = q.options.filter(o => o !== q.correctAnswer);
+                const hiddenByScissors = scissorsUsed && isWrong && wrongOptions.indexOf(opt) < 2;
+
+                if (hiddenByScissors && !showAnswer) return <div key={i} className="min-h-[140px]" />;
+                
+                const labels = ['A', 'B', 'C', 'D'];
+                const colors = [
+                  'bg-rose-500 hover:bg-rose-400 shadow-[0_8px_0_rgb(159,18,57)]',
+                  'bg-blue-500 hover:bg-blue-400 shadow-[0_8px_0_rgb(30,58,138)]',
+                  'bg-amber-500 hover:bg-amber-400 shadow-[0_8px_0_rgb(146,64,14)]',
+                  'bg-emerald-500 hover:bg-emerald-400 shadow-[0_8px_0_rgb(6,78,59)]'
+                ];
+                const selectedColors = [
+                  'bg-rose-600 shadow-[0_0px_0_rgb(159,18,57)] translate-y-[8px]',
+                  'bg-blue-600 shadow-[0_0px_0_rgb(30,58,138)] translate-y-[8px]',
+                  'bg-amber-600 shadow-[0_0px_0_rgb(146,64,14)] translate-y-[8px]',
+                  'bg-emerald-600 shadow-[0_0px_0_rgb(6,78,59)] translate-y-[8px]'
+                ];
+
+                const handleHostAnswer = () => {
+                  if (!isHostPlayer || hostHasAnswered || showAnswer) return;
+                  
+                  const q = questions[currentQuestionIndex];
+                  setHostQuickAnswers(prev => ({ ...prev, [q.id]: opt }));
+                  const isCorrect = opt === q.correctAnswer;
+                  const hasDoublePoints = hostPlayer?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.endTime > Date.now());
+                  let points = isCorrect ? Math.round(1000 * (timeLeftRef.current / q.timeLimit)) : 0;
+                  if (isCorrect && hasDoublePoints) {
+                    points *= 2;
+                  }
+
+                  setPlayers(prev => prev.map(p => {
+                    if (p.id === 'host') {
+                      // Chance for lucky block for host
+                      if (isCorrect && settingsRef.current.examType === 'NORMAL' && Math.random() < 0.3) {
+                        const powerUpTypes: PowerUpType[] = ['SCISSORS', 'LIGHTNING', 'FIREBALL', 'TORNADO', 'SHIELD', 'FREEZE', 'DOUBLE_POINTS', 'THIEF'];
+                        const type = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+                        const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
+                        setPendingPowerUp(powerUp);
+                        setShowLuckyBlock(true);
+                      }
+                      const newActiveEffects = isCorrect && hasDoublePoints 
+                        ? p.activeEffects.filter(e => e.type !== 'DOUBLE_POINTS')
+                        : p.activeEffects;
+                      return { ...p, hasAnswered: true, currentAnswer: opt, score: p.score + points, activeEffects: newActiveEffects };
+                    }
+                    return p;
+                  }));
+                };
+                
+                let btnClass = "relative p-8 rounded-3xl text-2xl font-bold transition-all flex items-center gap-6 min-h-[140px] group text-white ";
+                
+                if (showAnswer) {
+                  if (isCorrect) {
+                    btnClass += "bg-emerald-500 shadow-[0_0px_0_rgb(6,78,59)] translate-y-[8px] ring-4 ring-emerald-400 ring-offset-4 ring-offset-zinc-950";
+                  } else if (isHostSelected) {
+                    btnClass += "bg-red-600 shadow-[0_0px_0_rgb(153,27,27)] translate-y-[8px] opacity-50";
+                  } else {
+                    btnClass += "bg-zinc-800 shadow-[0_0px_0_rgb(39,39,42)] translate-y-[8px] opacity-30 grayscale";
+                  }
+                } else {
+                  if (isHostPlayer) {
+                    if (hostHasAnswered) {
+                      if (isHostSelected) {
+                        btnClass += selectedColors[i % 4];
+                      } else {
+                        btnClass += colors[i % 4] + " opacity-50 grayscale-[0.5]";
+                      }
+                    } else {
+                      btnClass += colors[i % 4] + " active:translate-y-[8px] active:shadow-none cursor-pointer";
+                    }
+                  } else {
+                    btnClass += colors[i % 4] + " cursor-default";
+                  }
+                }
+                
+                return (
+                  <button
+                    key={i}
+                    onClick={handleHostAnswer}
+                    disabled={showAnswer || (isHostPlayer && hostHasAnswered) || !isHostPlayer}
+                    className={btnClass}
+                  >
+                    <div className="w-16 h-16 rounded-2xl bg-white/20 flex items-center justify-center text-3xl flex-shrink-0">
+                      {labels[i]}
+                    </div>
+                    <span className="text-left leading-tight drop-shadow-md flex-1">{opt}</span>
+                    {showAnswer && isCorrect && <CheckCircle2 className="w-10 h-10 text-white drop-shadow-md flex-shrink-0" />}
+                    {showAnswer && !isCorrect && isHostSelected && <XCircle className="w-10 h-10 text-white/50 flex-shrink-0" />}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="w-full flex items-center justify-between">
+              {showAnswer ? (
+                <div className="text-zinc-400">
+                  Question Finished. Preparing next...
+                </div>
+              ) : (
+                <div className="text-zinc-400">
+                  {players.find(p => p.id === 'host')?.hasAnswered ? 'Waiting for others...' : 'Select your answer'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {gameState === 'QUICK_EXAM' && (
+          <div className="w-full max-w-4xl flex flex-col items-center relative">
+            {/* Host Controls - Hidden during exam for zero special privileges */}
+            {false && (
+            <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
+              <AnimatePresence>
+                {showHostControls && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 20, scale: 0.95 }}
+                    className="bg-zinc-900 border border-white/10 rounded-2xl p-4 shadow-2xl w-64 mb-2"
+                  >
+                    <div className="flex items-center gap-2 mb-4 text-indigo-400 font-bold text-sm uppercase tracking-wider">
+                      <Settings className="w-4 h-4" /> Host Controls
+                    </div>
+                    <div className="space-y-3">
+                      <div className="text-xs text-zinc-500 mb-1">Player Progress</div>
+                      <div className="max-h-40 overflow-y-auto space-y-2 mb-4">
+                        {players.filter(p => p.id !== 'host').map(p => (
+                          <div key={p.id} className="flex items-center justify-between text-xs">
+                            <span className="truncate max-w-[100px]">{p.name}</span>
+                            {p.hasAnswered ? (
+                              <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Done</span>
+                            ) : (
+                              <span className="text-amber-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> In Progress</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        onClick={handleQuickExamEnd}
+                        className="w-full bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-bold text-sm transition-colors"
+                      >
+                        End Exam for All
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              <button
+                onClick={() => setShowHostControls(!showHostControls)}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white p-4 rounded-full shadow-2xl transition-all flex items-center gap-2"
+              >
+                {showHostControls ? <ChevronDown className="w-6 h-6" /> : <Settings className="w-6 h-6" />}
+                {!showHostControls && <span className="font-bold pr-2">Host Controls</span>}
+              </button>
+            </div>
+            )}
+
+            {players.some(p => p.id === 'host') ? (
+              /* Host as Player UI */
+              <div className="w-full h-full flex flex-col">
+                <div className="flex items-center justify-between mb-8 bg-zinc-900/80 backdrop-blur-md p-5 rounded-3xl border border-white/10 shadow-xl">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-xl">
+                      {hostQuickCurrentIndex + 1}
+                    </div>
+                    <div className="text-zinc-400 font-medium">
+                      of {questions.length}
+                    </div>
+                  </div>
+                  <div className={clsx(
+                    "px-6 py-3 rounded-2xl font-mono text-2xl font-bold flex items-center gap-3",
+                    timeLeft <= 30 ? "bg-red-500/20 text-red-400 animate-pulse" : "bg-white/5 text-white"
+                  )}>
+                    <Timer className="w-6 h-6 opacity-50" />
+                    {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                  </div>
+                </div>
+
+                <div className="flex-1 flex flex-col">
+                  <div className="bg-zinc-900 border border-white/10 rounded-[2rem] p-8 md:p-12 shadow-2xl mb-8">
+                    <h2 className="text-3xl md:text-4xl font-medium leading-tight">
+                      {questions[hostQuickCurrentIndex].text}
+                    </h2>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                    {questions[hostQuickCurrentIndex].options.map((opt: string, i: number) => {
+                      const isSelected = hostQuickAnswers[questions[hostQuickCurrentIndex].id] === opt;
+                      const labels = ['A', 'B', 'C', 'D'];
+                      return (
+                        <button
+                          key={i}
+                          onClick={() => handleHostQuickAnswer(opt)}
+                          disabled={hostQuickSubmitted}
+                          className={clsx(
+                            "p-6 md:p-8 rounded-3xl text-xl font-medium transition-all text-left border-2 flex items-center gap-6 group",
+                            isSelected 
+                              ? "bg-indigo-600 border-indigo-500 text-white shadow-[0_0_30px_rgba(79,70,229,0.3)]" 
+                              : "bg-zinc-900/50 border-white/10 hover:bg-zinc-800 hover:border-white/20 text-zinc-300",
+                            hostQuickSubmitted && !isSelected && "opacity-50"
+                          )}
+                        >
+                          <div className={clsx(
+                            "w-12 h-12 rounded-xl flex items-center justify-center text-xl font-bold transition-colors flex-shrink-0",
+                            isSelected ? "bg-white/20 text-white" : "bg-white/5 text-zinc-500 group-hover:bg-white/10 group-hover:text-zinc-300"
+                          )}>
+                            {labels[i]}
+                          </div>
+                          <span className="flex-1">{opt}</span>
+                          {isSelected && <CheckCircle2 className="w-6 h-6 text-white flex-shrink-0" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between mt-auto pt-6 border-t border-white/10">
+                  <button
+                    onClick={() => setHostQuickCurrentIndex(prev => Math.max(0, prev - 1))}
+                    disabled={hostQuickCurrentIndex === 0}
+                    className="px-6 py-3 rounded-xl font-medium bg-zinc-800 text-white disabled:opacity-50 hover:bg-zinc-700 transition-colors"
+                  >
+                    Previous
+                  </button>
+                  
+                  {!hostQuickSubmitted ? (
+                    <button
+                      onClick={() => {
+                        if (hostQuickCurrentIndex === questions.length - 1) {
+                          if (Object.keys(hostQuickAnswers).length < questions.length) {
+                            if (!confirm('You have unanswered questions. Are you sure you want to submit?')) return;
+                          }
+                          submitHostQuickExam();
+                        } else {
+                          setHostQuickCurrentIndex(prev => Math.min(questions.length - 1, prev + 1));
+                        }
+                      }}
+                      className={clsx(
+                        "px-8 py-3 rounded-xl font-bold transition-colors",
+                        hostQuickCurrentIndex === questions.length - 1
+                          ? "bg-emerald-600 hover:bg-emerald-500 text-white"
+                          : "bg-indigo-600 hover:bg-indigo-500 text-white"
+                      )}
+                    >
+                      {hostQuickCurrentIndex === questions.length - 1 ? 'Submit Exam' : 'Next'}
+                    </button>
+                  ) : (
+                    <div className="text-emerald-400 font-medium flex items-center gap-2">
+                      <CheckCircle2 className="w-5 h-5" />
+                      Submitted! Waiting for others...
+                    </div>
+                  )}
+                </div>
+                
+                {/* Question Navigator */}
+                <div className="mt-8 flex flex-wrap gap-2 justify-center">
+                  {questions.map((q, i) => (
+                    <button
+                      key={q.id}
+                      onClick={() => setHostQuickCurrentIndex(i)}
+                      className={clsx(
+                        "w-10 h-10 rounded-lg font-medium text-sm flex items-center justify-center transition-colors border",
+                        hostQuickCurrentIndex === i ? "border-indigo-500 ring-2 ring-indigo-500/50" : "border-transparent",
+                        hostQuickAnswers[q.id] ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
+                      )}
+                    >
+                      {i + 1}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              /* Host as Observer UI (Original) */
+              <>
+                <div className="text-center mb-12">
+                  <h2 className="text-5xl font-bold mb-4">Quick Exam in Progress</h2>
+                  <p className="text-xl text-zinc-400">Players are answering at their own pace</p>
+                </div>
+
+                <div className="bg-zinc-900 border border-white/10 rounded-[2rem] p-8 w-full shadow-2xl mb-8">
+                  <div className="flex items-center justify-between mb-8">
+                    <div className="text-2xl font-medium">Time Remaining</div>
+                    <div className={clsx(
+                      "text-4xl font-mono font-bold flex items-center gap-3",
+                      timeLeft <= 30 ? "text-red-400 animate-pulse" : "text-white"
+                    )}>
+                      <Timer className="w-8 h-8 opacity-50" />
+                      {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="flex justify-between text-sm font-medium text-zinc-400 mb-2 px-2">
+                      <span>Player</span>
+                      <span>Status</span>
+                    </div>
+                    {players.filter(p => p.id !== 'host').map(p => (
+                      <div key={p.id} className="bg-zinc-800/50 border border-white/5 rounded-xl p-4 flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                          <div className="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-300 font-bold">
+                            {p.name.charAt(0).toUpperCase()}
+                          </div>
+                          <span className="font-medium text-lg">{p.name}</span>
+                        </div>
+                        <div>
+                          {p.hasAnswered ? (
+                            <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-sm font-medium">
+                              <CheckCircle2 className="w-4 h-4" />
+                              Finished
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/20 text-amber-400 text-sm font-medium">
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              In Progress
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleQuickExamEnd}
+                  className="bg-red-600 hover:bg-red-500 text-white px-8 py-4 rounded-xl font-bold text-lg transition-colors"
+                >
+                  End Exam Early
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {gameState === 'LEADERBOARD' && (
+          <div className="w-full max-w-2xl">
+            <h2 className="text-4xl font-bold text-center mb-12 flex items-center justify-center gap-4">
+              <Trophy className="w-10 h-10 text-yellow-400" />
+              Leaderboard
+            </h2>
+            
+            <div className="space-y-4 mb-12">
+              {players.sort((a, b) => b.score - a.score).slice(0, 5).map((p, i) => (
+                <motion.div
+                  key={p.id}
+                  initial={{ x: -20, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  transition={{ delay: i * 0.1 }}
+                  className="bg-zinc-900 border border-white/10 rounded-2xl p-6 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-6">
+                    <div className={clsx(
+                      "w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg",
+                      i === 0 ? "bg-yellow-500/20 text-yellow-400" :
+                      i === 1 ? "bg-zinc-300/20 text-zinc-300" :
+                      i === 2 ? "bg-amber-700/20 text-amber-600" :
+                      "bg-zinc-800 text-zinc-500"
+                    )}>
+                      {i + 1}
+                    </div>
+                    <span className="text-2xl font-bold">{p.name}</span>
+                  </div>
+                  <span className="text-2xl font-mono text-indigo-400">{p.score}</span>
+                </motion.div>
+              ))}
+            </div>
+
+            <div className="flex justify-center gap-4">
+              <button
+                onClick={() => setShowReview(true)}
+                className="bg-zinc-800 hover:bg-zinc-700 text-white px-8 py-4 rounded-xl font-bold text-lg transition-colors"
+              >
+                Review Exam
+              </button>
+              <button
+                onClick={nextPhase}
+                className="bg-white text-black px-12 py-4 rounded-xl font-bold text-lg hover:bg-zinc-200 transition-colors"
+              >
+                {settings.examType === 'QUICK' ? 'Finish Game' : (currentQuestionIndex + 1 < questions.length ? 'Next Question' : 'Finish Game')}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {gameState === 'FINISHED' && (
+          <div className="text-center">
+            <Trophy className="w-24 h-24 text-yellow-400 mx-auto mb-8" />
+            <h2 className="text-5xl font-bold mb-4">Game Over!</h2>
+            <p className="text-xl text-zinc-400 mb-12">Thanks for playing</p>
+            
+            <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8 max-w-md mx-auto mb-12">
+              <div className="text-sm text-zinc-500 uppercase tracking-widest mb-2">Winner</div>
+              <div className="text-4xl font-bold text-white mb-2">
+                {players.sort((a, b) => b.score - a.score)[0]?.name || 'No one'}
+              </div>
+              <div className="text-indigo-400 font-mono text-xl">
+                {players.sort((a, b) => b.score - a.score)[0]?.score || 0} pts
+              </div>
+            </div>
+
+            <div className="flex justify-center gap-4">
+              <button
+                onClick={startNewRound}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-3 rounded-xl font-medium transition-colors"
+              >
+                Start New Round
+              </button>
+              <button
+                onClick={() => setShowReview(true)}
+                className="bg-zinc-800 hover:bg-zinc-700 text-white px-8 py-3 rounded-xl font-medium transition-colors"
+              >
+                Review Exam
+              </button>
+              <button
+                onClick={onBack}
+                className="bg-zinc-800 text-white px-8 py-3 rounded-xl font-medium hover:bg-zinc-700 transition-colors"
+              >
+                Back to Home
+              </button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Review Modal */}
+      {showReview && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 md:p-8">
+          <div className="bg-zinc-950 border border-white/10 rounded-3xl w-full max-w-4xl max-h-full flex flex-col overflow-hidden">
+            <div className="p-6 border-b border-white/10 flex items-center justify-between bg-zinc-900/50">
+              <h2 className="text-2xl font-bold">Exam Review</h2>
+              <button 
+                onClick={() => setShowReview(false)}
+                className="p-2 hover:bg-white/10 rounded-full transition-colors"
+              >
+                <XCircle className="w-6 h-6 text-zinc-400" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-10">
+              {questions.map((q, index) => {
+                const userAnswer = hostQuickAnswers[q.id];
+                const correctAnswer = q.correctAnswer;
+                const isCorrect = userAnswer === correctAnswer;
+                
+                return (
+                  <div key={q.id} className="bg-zinc-900/80 border border-white/10 rounded-[2rem] p-8 shadow-xl">
+                    <div className="flex items-start gap-6 mb-8">
+                      <div className={clsx(
+                        "w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-xl flex-shrink-0 shadow-lg",
+                        isCorrect ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "bg-red-500/20 text-red-400 border border-red-500/30"
+                      )}>
+                        {index + 1}
+                      </div>
+                      <h3 className="text-2xl font-medium pt-2 leading-tight">{q.text}</h3>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {q.options.map((opt: string, i: number) => {
+                        const isSelected = userAnswer === opt;
+                        const isActualCorrect = correctAnswer === opt;
+                        const labels = ['A', 'B', 'C', 'D'];
+                        
+                        return (
+                          <div 
+                            key={i}
+                            className={clsx(
+                              "p-5 rounded-2xl border-2 flex items-center gap-4 transition-all",
+                              isActualCorrect
+                                ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-100 shadow-[0_0_20px_rgba(16,185,129,0.15)]"
+                                : isSelected
+                                  ? "bg-red-500/20 border-red-500/50 text-red-100"
+                                  : "bg-zinc-950/50 border-white/5 text-zinc-500"
+                            )}
+                          >
+                            <div className={clsx(
+                              "w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg flex-shrink-0",
+                              isActualCorrect ? "bg-emerald-500/30 text-emerald-300" :
+                              isSelected ? "bg-red-500/30 text-red-300" :
+                              "bg-white/5 text-zinc-600"
+                            )}>
+                              {labels[i]}
+                            </div>
+                            <span className="flex-1 text-lg">{opt}</span>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              {isSelected && !isActualCorrect && <span className="text-xs font-bold uppercase tracking-wider opacity-80 text-red-300 mr-2">Your Answer</span>}
+                              {isActualCorrect && <CheckCircle2 className="w-6 h-6 text-emerald-400" />}
+                              {isSelected && !isActualCorrect && <XCircle className="w-6 h-6 text-red-400" />}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    
+                    {q.explanation && (
+                      <div className="mt-6">
+                        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-2xl p-6">
+                          <h4 className="text-indigo-400 font-bold uppercase tracking-widest text-xs mb-2">Explanation</h4>
+                          <p className="text-zinc-300 italic leading-relaxed">{q.explanation}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
