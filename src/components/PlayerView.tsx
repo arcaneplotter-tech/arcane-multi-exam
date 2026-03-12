@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Peer, DataConnection } from 'peerjs';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, CheckCircle2, XCircle, Loader2, Trophy, AlertCircle, Timer, MessageSquare, Send, Zap, Flame, Box, Target, TrendingUp, Contrast, CloudLightning } from 'lucide-react';
-import { GameState, MessageType, ChatMessage, PowerUp, PowerUpType, ActiveEffect } from '../types';
+import { ArrowLeft, CheckCircle2, XCircle, Loader2, Trophy, AlertCircle, Timer, MessageSquare, Send, Users, Eye } from 'lucide-react';
+import { GameState, MessageType, ChatMessage } from '../types';
 import { clsx } from 'clsx';
+import { sounds } from '../utils/sounds';
 
 interface PlayerViewProps {
   onBack: () => void;
@@ -40,12 +41,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
   const [showReview, setShowReview] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [powerUps, setPowerUps] = useState<PowerUp[]>([]);
-  const [activeEffects, setActiveEffects] = useState<ActiveEffect[]>([]);
   const [isReady, setIsReady] = useState(false);
-  const [showLuckyBlock, setShowLuckyBlock] = useState(false);
-  const [pendingPowerUp, setPendingPowerUp] = useState<PowerUp | null>(null);
-  const [showTargetList, setShowTargetList] = useState<string | null>(null);
 
   const peerRef = useRef<Peer | null>(null);
   const quickTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -142,6 +138,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
         setQuickAnswers({});
         setQuestionStats({});
         setQuickQuestions([]);
+        sounds.playGameStart();
       }
       
       if (data.state === 'QUESTION') {
@@ -157,13 +154,8 @@ export function PlayerView({ onBack }: PlayerViewProps) {
         setTotalQuestions(data.data.totalQuestions || 0);
         setSelectedAnswer(null);
         setAnswerResult(null);
-        if (data.data.question?.options) {
-          setShuffledOptions([...data.data.question.options]);
-        }
-        setScissorsUsed(false);
         setAnswerCounts({});
         setRevealedCorrectAnswer(null);
-        setActiveEffects(prev => prev.filter(e => e.questionIndex >= (data.data.questionIndex || 0)));
       }
       if (data.state === 'QUICK_EXAM') {
         setQuickQuestions(data.data.questions);
@@ -207,15 +199,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       setMessages(prev => [...prev, data.message]);
     }
 
-    if (data.type === 'GIVE_POWER_UP') {
-      setPendingPowerUp(data.powerUp);
-      setShowLuckyBlock(true);
-    }
-
-    if (data.type === 'APPLY_EFFECT') {
-      setActiveEffects(prev => [...prev, { type: data.effect, questionIndex: data.questionIndex }]);
-    }
-
     if (data.type === 'PLAYER_LIST') {
       setPlayers(data.players);
       if (data.answerCounts) setAnswerCounts(data.answerCounts);
@@ -231,6 +214,9 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       });
       setMyScore(prev => prev + data.score);
       
+      if (data.correct) sounds.playCorrect();
+      else sounds.playIncorrect();
+
       // Points pop animation
       setPointsPop({ score: data.score, isCorrect: data.correct });
       setTimeout(() => setPointsPop(null), 2500);
@@ -257,19 +243,12 @@ export function PlayerView({ onBack }: PlayerViewProps) {
       setShowReview(false);
       setAnswerResult(null);
       setSelectedAnswer(null);
-      setPowerUps([]);
-      setActiveEffects([]);
       setIsReady(false);
     }
   };
 
   const submitAnswer = (answer: string) => {
     if (selectedAnswer || !connection) return;
-
-    // Check for Answer Lock
-    if (activeEffects.some(e => e.type === 'ANSWER_LOCK' && e.questionIndex === currentQuestionIndex)) {
-      return;
-    }
 
     setSelectedAnswer(answer);
     setQuickAnswers(prev => ({ ...prev, [currentQuestion.id]: answer }));
@@ -315,21 +294,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
     const newReadyState = !isReady;
     setIsReady(newReadyState);
     connection.send({ type: 'PLAYER_READY', ready: newReadyState });
-  };
-
-  const openLuckyBlock = () => {
-    if (pendingPowerUp) {
-      setPowerUps(prev => [...prev, pendingPowerUp]);
-      setPendingPowerUp(null);
-      setShowLuckyBlock(false);
-    }
-  };
-
-  const usePowerUp = (powerUpId: string, targetId: string) => {
-    if (!connection) return;
-    connection.send({ type: 'USE_POWER_UP', powerUpId, targetId });
-    setPowerUps(prev => prev.filter(pu => pu.id !== powerUpId));
-    setShowTargetList(null);
   };
 
   // Option colors for Kahoot-like feel
@@ -426,7 +390,7 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                   <div className="w-full bg-zinc-900 border border-white/10 rounded-3xl p-6 flex flex-col h-full">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-bold flex items-center gap-2">
-                        <Target className="w-5 h-5 text-emerald-400" />
+                        <Users className="w-5 h-5 text-emerald-400" />
                         Players ({players.length})
                       </h3>
                       <button
@@ -672,143 +636,18 @@ export function PlayerView({ onBack }: PlayerViewProps) {
 
             {gameState === 'QUESTION' && currentQuestion && !answerResult && (
               <div className="w-full h-full flex flex-col max-w-5xl mx-auto relative">
-                {settings?.chaosMode && (
-                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 z-20">
-                    <motion.div 
-                      animate={{ scale: [1, 1.1, 1] }}
-                      transition={{ repeat: Infinity, duration: 2 }}
-                      className="bg-orange-600/20 border border-orange-500/50 text-orange-400 px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-[0.3em] flex items-center gap-2 shadow-[0_0_15px_rgba(234,88,12,0.3)] whitespace-nowrap"
-                    >
-                      <Flame className="w-3 h-3" /> Chaos Mode Active <Flame className="w-3 h-3" />
-                    </motion.div>
-                  </div>
-                )}
-                {/* Power-ups UI for Player */}
-                <div className="fixed bottom-24 right-6 z-50 flex flex-col items-end gap-3">
-                  <AnimatePresence>
-                    {showLuckyBlock && (
-                      <motion.button
-                        initial={{ scale: 0, rotate: -180 }}
-                        animate={{ scale: 1, rotate: 0 }}
-                        exit={{ scale: 0, rotate: 180 }}
-                        onClick={openLuckyBlock}
-                        className="w-16 h-16 bg-yellow-500 rounded-2xl flex items-center justify-center shadow-[0_0_20px_rgba(234,179,8,0.5)] border-4 border-yellow-400 animate-bounce"
-                      >
-                        <Box className="w-8 h-8 text-white" />
-                      </motion.button>
-                    )}
-
-                    {powerUps.map((pu) => (
-                      <div key={pu.id} className="relative group">
-                        <motion.button
-                          initial={{ x: 50, opacity: 0 }}
-                          animate={{ x: 0, opacity: 1 }}
-                          className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg border-2 transition-all hover:scale-110"
-                        style={{ 
-                          backgroundColor: 
-                            pu.type === 'LIGHTNING' ? '#eab308' : 
-                            pu.type === 'FIREBALL' ? '#ef4444' : 
-                            pu.type === 'DOUBLE_POINTS' ? '#a855f7' : 
-                            pu.type === 'INVERT' ? '#ffffff' :
-                            pu.type === 'METEOR' ? '#f87171' : '#f97316',
-                          borderColor: 'rgba(255,255,255,0.2)'
-                        }}
-                        onClick={() => {
-                          if (['DOUBLE_POINTS'].includes(pu.type)) {
-                            usePowerUp(pu.id, peerRef.current?.id || '');
-                          } else {
-                            setShowTargetList(showTargetList === pu.id ? null : pu.id);
-                          }
-                        }}
-                      >
-                        {pu.type === 'LIGHTNING' && <Zap className="w-7 h-7 text-white" />}
-                        {pu.type === 'FIREBALL' && <Flame className="w-7 h-7 text-white" />}
-                        {pu.type === 'DOUBLE_POINTS' && <TrendingUp className="w-7 h-7 text-white" />}
-                        {pu.type === 'INVERT' && <Contrast className="w-7 h-7 text-black" />}
-                        {pu.type === 'METEOR' && <CloudLightning className="w-7 h-7 text-white" />}
-                        </motion.button>
-
-                        {showTargetList === pu.id && (
-                          <motion.div 
-                            initial={{ opacity: 0, scale: 0.9, x: -10 }}
-                            animate={{ opacity: 1, scale: 1, x: 0 }}
-                            className="absolute right-16 bottom-0 bg-zinc-900 border border-white/10 rounded-xl p-2 shadow-2xl min-w-[150px]"
-                          >
-                            <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
-                              <Target className="w-3 h-3" /> Use on:
-                            </div>
-                            <div className="space-y-1">
-                              <button
-                                onClick={() => usePowerUp(pu.id, 'host')}
-                                className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-white/5 transition-colors flex items-center justify-between group"
-                              >
-                                <span className="truncate">Host</span>
-                              </button>
-                              {players.filter(p => p.id !== peerRef.current?.id).map(p => (
-                                <button
-                                  key={p.id}
-                                  onClick={() => usePowerUp(pu.id, p.id)}
-                                  className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-white/5 transition-colors flex items-center justify-between group"
-                                >
-                                  <span className="truncate">{p.name}</span>
-                                </button>
-                              ))}
-                            </div>
-                          </motion.div>
-                        )}
-                      </div>
-                    ))}
-                  </AnimatePresence>
-                </div>
-
                 <div className="text-center mb-12">
                   <span className="inline-block px-4 py-1.5 rounded-full bg-white/10 text-white/70 font-medium text-sm mb-6 tracking-widest uppercase">
                     Question {currentQuestionIndex + 1} of {totalQuestions}
                   </span>
                   <div className="relative">
-                    {/* Lightning Effect */}
-                    {activeEffects.some(e => e.type === 'LIGHTNING' && e.questionIndex === currentQuestionIndex) && (
-                      <div className="absolute inset-0 bg-zinc-950 z-10 flex flex-col items-center justify-center text-yellow-400 animate-pulse rounded-2xl">
-                        <Zap className="w-12 h-12 mb-2" />
-                        <h3 className="text-lg font-bold uppercase tracking-widest">Blinded!</h3>
-                      </div>
-                    )}
-
-                    {/* Double Points Indicator */}
-                    {activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndex) && (
-                      <motion.div 
-                        initial={{ scale: 0, y: -20 }}
-                        animate={{ scale: 1, y: 0 }}
-                        className="absolute -top-8 left-1/2 -translate-x-1/2 bg-purple-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg flex items-center gap-2 z-30"
-                      >
-                        <TrendingUp className="w-4 h-4" /> 2X POINTS ACTIVE
-                      </motion.div>
-                    )}
-
-                    <h2 className="text-3xl md:text-5xl font-bold mb-4 leading-tight">{currentQuestion.text}</h2>
+                    <h2 className="text-3xl md:text-5xl font-bold mb-4 leading-tight transition-all">
+                      {currentQuestion.text}
+                    </h2>
                   </div>
                 </div>
                 
                 <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 relative">
-                  {/* Fireball Effect */}
-                  {activeEffects.some(e => e.type === 'FIREBALL' && e.questionIndex === currentQuestionIndex) && (
-                    <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden rounded-3xl">
-                      <div className="absolute inset-0 bg-orange-600/60 backdrop-blur-sm mix-blend-overlay" />
-                      {[...Array(6)].map((_, i) => (
-                        <motion.div
-                          key={i}
-                          initial={{ y: 300, opacity: 0 }}
-                          animate={{ y: -300, opacity: [0, 1, 0] }}
-                          transition={{ duration: 1.5, repeat: Infinity, delay: i * 0.3 }}
-                          className="absolute bottom-0 text-orange-500"
-                          style={{ left: `${i * 20}%` }}
-                        >
-                          <Flame className="w-16 h-16" />
-                        </motion.div>
-                      ))}
-                    </div>
-                  )}
-
                   {currentQuestion.options.map((opt: string, i: number) => {
                     const colors = [
                       'bg-rose-500 hover:bg-rose-400 shadow-[0_6px_0_rgb(159,18,57)]',
@@ -827,14 +666,6 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                     const isSelected = selectedAnswer === opt;
                     const isDisabled = !!selectedAnswer;
 
-                    // Invert: Swap answers visually
-                    const invertActive = activeEffects.some(e => e.type === 'INVERT' && e.questionIndex === currentQuestionIndex);
-                    const displayOpt = invertActive ? currentQuestion.options[(i + 2) % 4] : opt;
-                    
-                    // Meteor: Hide some options
-                    const meteorActive = activeEffects.some(e => e.type === 'METEOR' && e.questionIndex === currentQuestionIndex);
-                    const isHidden = meteorActive && (i === 1 || i === 3);
-
                     return (
                       <button
                         key={i}
@@ -844,15 +675,14 @@ export function PlayerView({ onBack }: PlayerViewProps) {
                           "relative p-6 md:p-8 rounded-3xl text-xl md:text-2xl font-bold transition-all flex items-center gap-6 min-h-[120px] md:min-h-[160px] group",
                           isSelected ? selectedColors[i % 4] : colors[i % 4],
                           isDisabled && !isSelected ? "opacity-40 grayscale-[0.5]" : "",
-                          !isDisabled && "active:translate-y-[6px] active:shadow-none",
-                          isHidden && "opacity-0 pointer-events-none"
+                          !isDisabled && "active:translate-y-[6px] active:shadow-none"
                         )}
                       >
                         <div className="w-12 h-12 md:w-16 md:h-16 rounded-2xl bg-white/20 flex items-center justify-center text-2xl md:text-3xl flex-shrink-0">
                           {labels[i]}
                         </div>
                         <div className="flex-1 flex flex-col items-start">
-                          <span className="text-left leading-tight drop-shadow-md">{displayOpt}</span>
+                          <span className="text-left leading-tight drop-shadow-md">{opt}</span>
                         </div>
                       </button>
                     );

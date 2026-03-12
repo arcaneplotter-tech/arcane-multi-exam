@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Peer, DataConnection } from 'peerjs';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Users, Play, ArrowLeft, Trophy, CheckCircle2, XCircle, Loader2, Copy, Check, Timer, ChevronDown, ChevronUp, Settings, MessageSquare, Send, Zap, Flame, Box, Target, TrendingUp, Contrast, CloudLightning } from 'lucide-react';
+import { Upload, Users, Play, ArrowLeft, Trophy, CheckCircle2, XCircle, Loader2, Copy, Check, Timer, ChevronDown, ChevronUp, Settings, MessageSquare, Send, RefreshCw, Lightbulb } from 'lucide-react';
 import Papa from 'papaparse';
-import { PowerCatalog } from './PowerCatalog';
-import { POWER_UPS_INFO } from '../constants/powerUps';
-import { Question, Player, GameState, MessageType, GameSettings, ChatMessage, PowerUp, PowerUpType } from '../types';
+import { Question, Player, GameState, MessageType, GameSettings, ChatMessage } from '../types';
 import { clsx } from 'clsx';
 
 interface HostViewProps {
   onBack: () => void;
 }
+
+import { sounds } from '../utils/sounds';
 
 export function HostView({ onBack }: HostViewProps) {
   const [peer, setPeer] = useState<Peer | null>(null);
@@ -25,26 +25,16 @@ export function HostView({ onBack }: HostViewProps) {
   const [csvText, setCsvText] = useState('');
   const [hostName, setHostName] = useState('');
   const [settings, setSettings] = useState<GameSettings>({
+    timeMode: 'PER_QUESTION',
     timePerQuestion: 20,
+    totalExamTime: 600, // 10 minutes default
     examType: 'NORMAL',
     shuffleQuestions: false,
     shuffleOptions: false,
     showCorrectAnswer: true,
     canSkipQuestions: true,
     pointMultiplier: 1,
-    penaltyPoints: 0,
-    chaosMode: false,
-    chaosIntensity: 'MILD',
-    powerUpFrequency: 'NORMAL',
-    allowStacking: false,
-    maxActivePowers: 3,
-    chaosDurationMultiplier: 1,
-    enableFriendlyFire: false,
-    autoBalance: false,
-    powerUpConfigs: POWER_UPS_INFO.reduce((acc, p) => ({
-      ...acc,
-      [p.type]: { enabled: true, cooldown: 30 }
-    }), {})
+    penaltyPoints: 0
   });
   
   const [hostQuickCurrentIndex, setHostQuickCurrentIndex] = useState(0);
@@ -57,11 +47,6 @@ export function HostView({ onBack }: HostViewProps) {
   const [hostLastPoints, setHostLastPoints] = useState<number>(0);
   const [chatInput, setChatInput] = useState('');
   const [promptCopied, setPromptCopied] = useState(false);
-  const [showLuckyBlock, setShowLuckyBlock] = useState(false);
-  const [pendingPowerUp, setPendingPowerUp] = useState<PowerUp | null>(null);
-  const [showTargetList, setShowTargetList] = useState<string | null>(null); // powerUpId
-  const [shuffledOptions, setShuffledOptions] = useState<string[]>([]);
-  const [scissorsUsed, setScissorsUsed] = useState(false);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const nextQuestionTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -149,49 +134,9 @@ export function HostView({ onBack }: HostViewProps) {
   }, []);
 
   const broadcast = (message: any) => {
-    // Calculate answer counts for Mind Reader
-    let answerCounts: Record<string, number> | undefined;
-    if (message.type === 'PLAYER_LIST') {
-      answerCounts = {};
-      playersRef.current.forEach(p => {
-        if (p.currentAnswer) {
-          answerCounts![p.currentAnswer] = (answerCounts![p.currentAnswer] || 0) + 1;
-        }
-      });
-    }
-
-    const playerList = message.type === 'PLAYER_LIST' ? message.players.map((p: any) => {
-      const originalPlayer = playersRef.current.find(op => op.id === p.id);
-      const isStealth = originalPlayer?.activeEffects.some(e => e.type === 'STEALTH_MODE' && e.questionIndex === currentQuestionIndexRef.current);
-      if (isStealth && p.id !== 'host') {
-        return { ...p, name: 'Hidden Player', score: '???' };
-      }
-      return p;
-    }) : undefined;
-
     playersRef.current.forEach(p => {
       if (p.connection && p.connection.open) {
-        let msgToSend = playerList ? { ...message, players: playerList } : message;
-        
-        if (message.type === 'PLAYER_LIST') {
-          const payload = { ...msgToSend };
-          
-          // Special info for Mind Reader
-          if (p.activeEffects.some(e => e.type === 'MIND_READER' && e.questionIndex === currentQuestionIndexRef.current)) {
-            payload.answerCounts = answerCounts;
-          }
-
-          // Special info for X-Ray Vision
-          if (p.activeEffects.some(e => e.type === 'XRAY_VISION' && e.questionIndex === currentQuestionIndexRef.current)) {
-            const q = questionsRef.current[currentQuestionIndexRef.current];
-            if (q) {
-              payload.correctAnswer = q.correctAnswer;
-            }
-          }
-          msgToSend = payload;
-        }
-        
-        p.connection.send(msgToSend);
+        p.connection.send(message);
       }
     });
   };
@@ -205,8 +150,6 @@ export function HostView({ onBack }: HostViewProps) {
         hasAnswered: false,
         currentAnswer: null,
         connection: conn,
-        powerUps: [],
-        activeEffects: [],
         correctCount: 0,
         isReady: false
       };
@@ -214,6 +157,7 @@ export function HostView({ onBack }: HostViewProps) {
       setPlayers(prev => {
         // Prevent duplicates
         if (prev.some(p => p.id === conn.peer)) return prev;
+        sounds.playPlayerJoin();
         return [...prev, newPlayer];
       });
 
@@ -297,66 +241,11 @@ export function HostView({ onBack }: HostViewProps) {
           let points = 0;
           
           if (isCorrect) {
-            const hasDoublePoints = p.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndexRef.current);
-            const hasClue = p.activeEffects.some(e => e.type === 'CLUE' && e.questionIndex === currentQuestionIndexRef.current);
-            
-            points = Math.round(1000 * (timeLeftRef.current / q.timeLimit) * settingsRef.current.pointMultiplier);
-            
-            if (hasDoublePoints) {
-              points *= 2;
-              // Remove effect
-              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'DOUBLE_POINTS') } : pl));
-            }
-            
-            if (hasClue) {
-              points = Math.round(points * 0.5);
-              // Remove effect
-              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'CLUE') } : pl));
-            }
-            
-            // 100% chance to get a lucky box on correct answer if chaosMode is enabled
-            if (settingsRef.current.chaosMode) {
-              const enabledPowerUps = Object.entries(settingsRef.current.powerUpConfigs || {})
-                .filter(([_, config]: [string, any]) => config.enabled)
-                .map(([type]) => type as PowerUpType);
-              
-              const fallbackTypes: PowerUpType[] = ['LIGHTNING', 'FIREBALL', 'DOUBLE_POINTS', 'INVERT', 'METEOR'];
-              const availableTypes = enabledPowerUps.length > 0 ? enabledPowerUps : fallbackTypes;
-              
-              const type = availableTypes[Math.floor(Math.random() * availableTypes.length)];
-              const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
-              
-              // MAGNET logic: check if anyone else has MAGNET active
-              const magnetHolder = playersRef.current.find(p => p.id !== conn.peer && p.activeEffects.some(e => e.type === 'MAGNET' && e.questionIndex === currentQuestionIndexRef.current));
-              
-              if (magnetHolder) {
-                // Give to magnet holder instead
-                if (magnetHolder.id === 'host') {
-                  setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, powerUp] } : p));
-                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `Magnet attracted a power-up from ${p.name}!`, timestamp: Date.now() }]);
-                } else if (magnetHolder.connection && magnetHolder.connection.open) {
-                  magnetHolder.connection.send({ type: 'GIVE_POWER_UP', powerUp });
-                  magnetHolder.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Magnet attracted a power-up from ${p.name}!`, timestamp: Date.now() }});
-                }
-                // Notify the original player
-                if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Your power-up was attracted by ${magnetHolder.name}'s Magnet!`, timestamp: Date.now() }});
-                
-                // Remove MAGNET effect after use
-                setPlayers(prev => prev.map(pl => pl.id === magnetHolder.id ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'MAGNET') } : pl));
-              } else {
-                if (conn.open) {
-                  conn.send({ type: 'GIVE_POWER_UP', powerUp });
-                }
-              }
-            }
+            const maxPoints = 1000 * settingsRef.current.pointMultiplier;
+            const minPoints = maxPoints / 2;
+            points = Math.round(minPoints + (minPoints * (timeLeftRef.current / q.timeLimit)));
           } else {
-            const hasBomb = p.activeEffects.some(e => e.type === 'BOMB' && e.questionIndex === currentQuestionIndexRef.current);
             points = -settingsRef.current.penaltyPoints;
-            if (hasBomb) {
-              points -= 500;
-              // Remove effect
-              setPlayers(prev => prev.map(pl => pl.id === conn.peer ? { ...pl, activeEffects: pl.activeEffects.filter(e => e.type !== 'BOMB') } : pl));
-            }
           }
           
           if (conn.open) {
@@ -397,10 +286,14 @@ export function HostView({ onBack }: HostViewProps) {
             }
           });
 
-          const timeBonus = Math.max(0, Math.round(1000 * ((totalTime - data.timeTaken) / totalTime)));
-          totalScore = (correctAnswers * 1000 * settingsRef.current.pointMultiplier) 
-                       - (wrongAnswers * settingsRef.current.penaltyPoints)
-                       + (correctAnswers > 0 ? timeBonus : 0);
+          const maxPointsPerQuestion = 1000 * settingsRef.current.pointMultiplier;
+          const minPointsPerQuestion = maxPointsPerQuestion / 2;
+          const timeRatio = Math.max(0, (totalTime - data.timeTaken) / totalTime);
+          
+          const pointsPerCorrectAnswer = Math.round(minPointsPerQuestion + (minPointsPerQuestion * timeRatio));
+          
+          totalScore = (correctAnswers * pointsPerCorrectAnswer) 
+                       - (wrongAnswers * settingsRef.current.penaltyPoints);
 
           return { ...p, hasAnswered: true, score: Math.max(0, totalScore), timeTaken: data.timeTaken };
         }
@@ -411,174 +304,6 @@ export function HostView({ onBack }: HostViewProps) {
     if (data.type === 'CHAT_MESSAGE') {
       setMessages(prev => [...prev, data.message]);
       broadcast(data);
-    }
-
-    if (data.type === 'USE_POWER_UP') {
-      const { powerUpId, targetId } = data;
-      const player = playersRef.current.find(p => p.id === conn.peer);
-      if (player) {
-        const powerUp = player.powerUps.find(pu => pu.id === powerUpId);
-        if (powerUp) {
-          // Remove power-up from player
-          setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
-          
-          if (powerUp.type === 'SHIELD' || powerUp.type === 'FREEZE' || powerUp.type === 'DOUBLE_POINTS' || powerUp.type === 'REVENGE' || powerUp.type === 'CLUE' || powerUp.type === 'REVEAL' || powerUp.type === 'MAGNET' || powerUp.type === 'FORCE_FIELD' || powerUp.type === 'STEALTH_MODE' || powerUp.type === 'MAGNET_SHIELD' || powerUp.type === 'CLARITY' || powerUp.type === 'SECOND_CHANCE' || powerUp.type === 'XRAY_VISION' || powerUp.type === 'MIND_READER') {
-            // Self-applied
-            const duration = (['SHIELD', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'MAGNET', 'FORCE_FIELD', 'STEALTH_MODE', 'MAGNET_SHIELD', 'XRAY_VISION', 'MIND_READER'].includes(powerUp.type) ? 30000 : 5000);
-            
-            if (powerUp.type === 'CLARITY') {
-              setPlayers(prev => prev.map(p => p.id === conn.peer ? { 
-                ...p, 
-                activeEffects: p.activeEffects.filter(e => !['LIGHTNING', 'FIREBALL', 'TORNADO', 'BOMB', 'BLINDING_BLAST', 'CONFUSION_CLOUD', 'GRAVITY_SWITCH', 'BLACKOUT', 'POISON', 'VAMPIRE', 'GRAVITY', 'INVERT', 'METEOR', 'HAMMER'].includes(e.type)) 
-              } : p));
-            } else {
-              setPlayers(prev => prev.map(p => p.id === conn.peer ? { 
-                ...p, 
-                activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
-              } : p));
-            }
-
-            if (conn.open) {
-              conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-            }
-
-            if (powerUp.type === 'REVEAL') {
-              // Calculate most popular answer
-              const answers: Record<string, number> = {};
-              playersRef.current.forEach(p => {
-                if (p.currentAnswer) {
-                  answers[p.currentAnswer] = (answers[p.currentAnswer] || 0) + 1;
-                }
-              });
-              const popular = Object.entries(answers).sort((a, b) => b[1] - a[1])[0];
-              const msg = popular ? `Popular answer: ${popular[0]} (${popular[1]} players)` : "No answers yet!";
-              if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-            }
-          } else if (powerUp.type === 'TIME_WARP') {
-            // Reset timer
-            const q = questionsRef.current[currentQuestionIndexRef.current];
-            if (q) {
-              setTimeLeft(q.timeLimit);
-            }
-          } else {
-            // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
-            const target = playersRef.current.find(p => p.id === targetId);
-            if (target) {
-              const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndexRef.current);
-              const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndexRef.current);
-              
-              if (hasMirror && powerUp.type !== 'THIEF') {
-                // Reflect back to sender
-                setPlayers(prev => prev.map(p => p.id === targetId ? { 
-                  ...p, 
-                  activeEffects: p.activeEffects.filter(e => e.type !== 'REVENGE') 
-                } : p));
-                
-                const msg = `Mirror reflected ${powerUp.type} back to ${player.name}!`;
-                if (conn.open) {
-                  conn.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-                  conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                }
-                return;
-              }
-
-              if (hasShield) {
-                // Remove shield and don't apply effect
-                setPlayers(prev => prev.map(p => p.id === targetId ? { 
-                  ...p, 
-                  activeEffects: p.activeEffects.filter(e => e.type !== 'SHIELD') 
-                } : p));
-                
-                // Notify both
-                const msg = `Shield blocked ${powerUp.type}!`;
-                if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                if (targetId !== 'host' && target.connection && target.connection.open) {
-                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                }
-                return;
-              }
-
-              if (powerUp.type === 'THIEF') {
-                if (target.powerUps.length > 0) {
-                  const randomIndex = Math.floor(Math.random() * target.powerUps.length);
-                  const stolenPowerUp = target.powerUps[randomIndex];
-                  setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, powerUps: p.powerUps.filter((_, i) => i !== randomIndex) } : p));
-                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: [...p.powerUps, stolenPowerUp] } : p));
-                  if (conn.open) conn.send({ type: 'GIVE_POWER_UP', powerUp: stolenPowerUp });
-                  
-                  const notifyMsg = `Your ${stolenPowerUp.type} was stolen by ${player.name}!`;
-                  if (targetId === 'host') {
-                    setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: notifyMsg, timestamp: Date.now() }]);
-                  } else if (target.connection && target.connection.open) {
-                    target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: notifyMsg, timestamp: Date.now() }});
-                  }
-                }
-              } else if (powerUp.type === 'MIRROR_MIND') {
-                if (target.currentAnswer) {
-                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, currentAnswer: target.currentAnswer, hasAnswered: true } : p));
-                  if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `You copied ${target.name}'s answer!`, timestamp: Date.now() }});
-                } else {
-                  if (conn.open) conn.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `${target.name} hasn't answered yet!`, timestamp: Date.now() }});
-                }
-              } else if (powerUp.type === 'SABOTAGE') {
-                setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, currentAnswer: 'WRONG_ANSWER_SABOTAGED', hasAnswered: true } : p));
-                const msg = `Your answer was sabotaged by ${player.name}!`;
-                if (targetId === 'host') {
-                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
-                } else if (target.connection && target.connection.open) {
-                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                }
-              } else if (powerUp.type === 'SCORE_SWAP') {
-                const targetScore = target.score;
-                const myScore = player.score;
-                setPlayers(prev => prev.map(p => {
-                  if (p.id === targetId) return { ...p, score: myScore };
-                  if (p.id === conn.peer) return { ...p, score: targetScore };
-                  return p;
-                }));
-                const msg = `Your score was swapped with ${player.name}!`;
-                if (targetId === 'host') {
-                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
-                } else if (target.connection && target.connection.open) {
-                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                }
-              } else if (powerUp.type === 'CHAOS_DUPLICATOR') {
-                if (player.powerUps.length > 0) {
-                  const randomPU = player.powerUps[Math.floor(Math.random() * player.powerUps.length)];
-                  const newPU = { ...randomPU, id: Math.random().toString(36).substr(2, 9) };
-                  setPlayers(prev => prev.map(p => p.id === conn.peer ? { ...p, powerUps: [...p.powerUps, newPU] } : p));
-                  if (conn.open) conn.send({ type: 'GIVE_POWER_UP', powerUp: newPU });
-                }
-              } else if (powerUp.type === 'SHUFFLE' || powerUp.type === 'CONFUSION_CLOUD' || powerUp.type === 'TORNADO') {
-                if (targetId === 'host') {
-                  setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
-                } else if (target.connection && target.connection.open) {
-                  target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-                }
-              } else if (powerUp.type === 'ANSWER_LOCK') {
-                setPlayers(prev => prev.map(p => p.id === targetId ? { 
-                  ...p, 
-                  hasAnswered: true,
-                  currentAnswer: p.currentAnswer || 'LOCKED_NO_ANSWER' 
-                } : p));
-                const msg = `Your answer was locked by ${player.name}!`;
-                if (targetId === 'host') {
-                  setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
-                } else if (target.connection && target.connection.open) {
-                  target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-                }
-              } else if (targetId === 'host') {
-                setPlayers(prev => prev.map(p => p.id === 'host' ? { 
-                  ...p, 
-                  activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
-                } : p));
-              } else if (target.connection && target.connection.open) {
-                target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-              }
-            }
-          }
-        }
-      }
     }
   };
 
@@ -618,21 +343,6 @@ export function HostView({ onBack }: HostViewProps) {
     });
   };
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setPlayers(prev => prev.map(p => ({
-        ...p,
-        activeEffects: p.activeEffects.filter(e => e.questionIndex === currentQuestionIndexRef.current)
-      })));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Chaos Mode Events
-  useEffect(() => {
-    // Chaos mode now only enables lucky boxes
-  }, [gameState, settings.chaosMode]);
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -664,8 +374,6 @@ export function HostView({ onBack }: HostViewProps) {
       hasAnswered: false,
       currentAnswer: null,
       connection: null as any,
-      powerUps: [],
-      activeEffects: [],
       correctCount: 0,
       isReady: true
     };
@@ -686,8 +394,6 @@ export function HostView({ onBack }: HostViewProps) {
         hasAnswered: false,
         currentAnswer: null,
         connection: null as any,
-        powerUps: [],
-        activeEffects: [],
         correctCount: 0,
         isReady: true
       };
@@ -709,8 +415,19 @@ export function HostView({ onBack }: HostViewProps) {
       }));
     }
     
+    // Apply time limits
+    const calculatedTimeLimit = settings.timeMode === 'TOTAL_EXAM' 
+      ? Math.max(1, Math.floor(settings.totalExamTime / finalQuestions.length))
+      : settings.timePerQuestion;
+      
+    finalQuestions = finalQuestions.map(q => ({
+      ...q,
+      timeLimit: calculatedTimeLimit
+    }));
+    
     setQuestions(finalQuestions);
     setGameState('STARTING');
+    sounds.playGameStart();
     questionStatsRef.current = {};
     setHostQuickAnswers({});
     broadcast({ type: 'STATE_UPDATE', state: 'STARTING' });
@@ -802,6 +519,7 @@ export function HostView({ onBack }: HostViewProps) {
     
     let totalScore = 0;
     let correctAnswers = 0;
+    let wrongAnswers = 0;
     const totalTime = questions.reduce((acc, q) => acc + q.timeLimit, 0);
 
     questions.forEach(q => {
@@ -812,11 +530,18 @@ export function HostView({ onBack }: HostViewProps) {
       }
       if (answer === q.correctAnswer) {
         correctAnswers++;
+      } else if (answer) {
+        wrongAnswers++;
       }
     });
 
-    const timeBonus = Math.max(0, Math.round(1000 * ((totalTime - timeTaken) / totalTime)));
-    totalScore = (correctAnswers * 1000) + (correctAnswers > 0 ? timeBonus : 0);
+    const maxPointsPerQuestion = 1000 * settingsRef.current.pointMultiplier;
+    const minPointsPerQuestion = maxPointsPerQuestion / 2;
+    const timeRatio = Math.max(0, (totalTime - timeTaken) / totalTime);
+    
+    const pointsPerCorrectAnswer = Math.round(minPointsPerQuestion + (minPointsPerQuestion * timeRatio));
+    
+    totalScore = (correctAnswers * pointsPerCorrectAnswer) - (wrongAnswers * settingsRef.current.penaltyPoints);
 
     setPlayers(prev => prev.map(p => {
       if (p.id === 'host') {
@@ -854,9 +579,6 @@ export function HostView({ onBack }: HostViewProps) {
     if (timerRef.current) clearInterval(timerRef.current);
     
     timerRef.current = setInterval(() => {
-      const anyFreeze = playersRef.current.some(p => p.activeEffects.some(e => e.type === 'FREEZE' && e.questionIndex === currentQuestionIndexRef.current));
-      if (anyFreeze) return;
-      
       setTimeLeft(prev => {
         if (prev <= 1) {
           if (timerRef.current) {
@@ -870,9 +592,6 @@ export function HostView({ onBack }: HostViewProps) {
       });
     }, 1000);
 
-    // Initial shuffle for tornado effect if needed
-    setShuffledOptions([...q.options]);
-    setScissorsUsed(false);
     isHandlingQuestionEndRef.current = false;
   };
 
@@ -901,7 +620,6 @@ export function HostView({ onBack }: HostViewProps) {
     isHandlingQuestionEndRef.current = true;
 
     setShowAnswer(true);
-    setScissorsUsed(false);
     const q = questionsRef.current[currentQuestionIndexRef.current];
     
     // Update players state for those who didn't answer
@@ -925,6 +643,8 @@ export function HostView({ onBack }: HostViewProps) {
     if (hostPlayer) {
       const isCorrect = hostPlayer.hasAnswered && hostPlayer.currentAnswer === q.correctAnswer;
       setPointsPop({ score: hostLastPoints, isCorrect });
+      if (isCorrect) sounds.playCorrect();
+      else sounds.playIncorrect();
       setTimeout(() => setPointsPop(null), 2500);
     }
 
@@ -1004,178 +724,6 @@ export function HostView({ onBack }: HostViewProps) {
     setMessages(prev => [...prev, newMessage]);
     broadcast({ type: 'CHAT_MESSAGE', message: newMessage });
     setChatInput('');
-  };
-
-  const usePowerUp = (powerUpId: string, targetId: string) => {
-    const host = players.find(p => p.id === 'host');
-    if (!host) return;
-    const powerUp = host.powerUps.find(pu => pu.id === powerUpId);
-    if (!powerUp) return;
-
-    // Remove from host
-    setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
-
-    // Apply effect
-    if (powerUp.type === 'SHIELD' || powerUp.type === 'FREEZE' || powerUp.type === 'DOUBLE_POINTS' || powerUp.type === 'REVENGE' || powerUp.type === 'CLUE' || powerUp.type === 'REVEAL' || powerUp.type === 'MAGNET' || powerUp.type === 'FORCE_FIELD' || powerUp.type === 'STEALTH_MODE' || powerUp.type === 'MAGNET_SHIELD' || powerUp.type === 'CLARITY' || powerUp.type === 'SECOND_CHANCE' || powerUp.type === 'XRAY_VISION' || powerUp.type === 'MIND_READER') {
-      // Self-applied
-      const duration = (['SHIELD', 'DOUBLE_POINTS', 'REVENGE', 'CLUE', 'MAGNET', 'FORCE_FIELD', 'STEALTH_MODE', 'MAGNET_SHIELD', 'XRAY_VISION', 'MIND_READER'].includes(powerUp.type) ? 30000 : 5000);
-      
-      if (powerUp.type === 'CLARITY') {
-        setPlayers(prev => prev.map(p => p.id === 'host' ? { 
-          ...p, 
-          activeEffects: p.activeEffects.filter(e => !['LIGHTNING', 'FIREBALL', 'TORNADO', 'BOMB', 'BLINDING_BLAST', 'CONFUSION_CLOUD', 'GRAVITY_SWITCH', 'BLACKOUT', 'POISON', 'VAMPIRE', 'GRAVITY', 'INVERT', 'METEOR', 'HAMMER'].includes(e.type)) 
-        } : p));
-      } else {
-        setPlayers(prev => prev.map(p => p.id === 'host' ? { 
-          ...p, 
-          activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
-        } : p));
-      }
-
-      if (powerUp.type === 'REVEAL') {
-        const answers: Record<string, number> = {};
-        players.forEach(p => {
-          if (p.currentAnswer) {
-            answers[p.currentAnswer] = (answers[p.currentAnswer] || 0) + 1;
-          }
-        });
-        const popular = Object.entries(answers).sort((a, b) => b[1] - a[1])[0];
-        const msg = popular ? `Popular answer: ${popular[0]} (${popular[1]} players)` : "No answers yet!";
-        setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }]);
-      }
-    } else if (powerUp.type === 'TIME_WARP') {
-      // Reset timer
-      const q = questions[currentQuestionIndex];
-      if (q) {
-        setTimeLeft(q.timeLimit);
-      }
-    } else {
-      // Offensive power-ups (LIGHTNING, FIREBALL, TORNADO, THIEF, BOMB)
-      const target = players.find(p => p.id === targetId);
-      if (target) {
-        const hasShield = target.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndexRef.current);
-        const hasMirror = target.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndexRef.current);
-
-        if (hasMirror && powerUp.type !== 'THIEF') {
-          // Reflect back to host
-          setPlayers(prev => prev.map(p => p.id === targetId ? { 
-            ...p, 
-            activeEffects: p.activeEffects.filter(e => e.type !== 'REVENGE') 
-          } : p));
-          
-          setPlayers(prev => prev.map(p => p.id === 'host' ? { 
-            ...p, 
-            activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
-          } : p));
-          
-          const msg = `Revenge reflected ${powerUp.type} back to the Host!`;
-          if (targetId !== 'host' && target.connection && target.connection.open) {
-            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-          }
-          return;
-        }
-
-        if (hasShield) {
-          // Remove shield and don't apply effect
-          setPlayers(prev => prev.map(p => p.id === targetId ? { 
-            ...p, 
-            activeEffects: p.activeEffects.filter(e => e.type !== 'SHIELD') 
-          } : p));
-          
-          // Notify both
-          const msg = `Shield blocked ${powerUp.type}!`;
-          if (targetId !== 'host' && target.connection && target.connection.open) {
-            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-          }
-          return;
-        }
-
-        if (powerUp.type === 'THIEF') {
-          if (target.powerUps.length > 0) {
-            const randomIndex = Math.floor(Math.random() * target.powerUps.length);
-            const stolenPowerUp = target.powerUps[randomIndex];
-            setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, powerUps: p.powerUps.filter((_, i) => i !== randomIndex) } : p));
-            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, stolenPowerUp] } : p));
-            if (targetId !== 'host' && target.connection && target.connection.open) {
-              target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: `Your ${stolenPowerUp.type} was stolen by the Host!`, timestamp: Date.now() }});
-            }
-          }
-        } else if (powerUp.type === 'MIRROR_MIND') {
-          if (target.currentAnswer) {
-            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, currentAnswer: target.currentAnswer, hasAnswered: true } : p));
-            setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `You copied ${target.name}'s answer!`, timestamp: Date.now() }]);
-          } else {
-            setMessages(prev => [...prev, { senderId: 'system', senderName: 'System', text: `${target.name} hasn't answered yet!`, timestamp: Date.now() }]);
-          }
-        } else if (powerUp.type === 'SABOTAGE') {
-          setPlayers(prev => prev.map(p => p.id === targetId ? { ...p, currentAnswer: 'WRONG_ANSWER_SABOTAGED', hasAnswered: true } : p));
-          const msg = `Your answer was sabotaged by the Host!`;
-          if (target.connection && target.connection.open) {
-            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-          }
-        } else if (powerUp.type === 'SCORE_SWAP') {
-          const targetScore = target.score;
-          const hostScore = host.score;
-          setPlayers(prev => prev.map(p => {
-            if (p.id === targetId) return { ...p, score: hostScore };
-            if (p.id === 'host') return { ...p, score: targetScore };
-            return p;
-          }));
-          const msg = `Your score was swapped with the Host!`;
-          if (target.connection && target.connection.open) {
-            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-          }
-        } else if (powerUp.type === 'CHAOS_DUPLICATOR') {
-          if (host.powerUps.length > 0) {
-            const randomPU = host.powerUps[Math.floor(Math.random() * host.powerUps.length)];
-            const newPU = { ...randomPU, id: Math.random().toString(36).substr(2, 9) };
-            setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, newPU] } : p));
-          }
-        } else if (powerUp.type === 'SHUFFLE' || powerUp.type === 'CONFUSION_CLOUD' || powerUp.type === 'TORNADO') {
-          if (targetId === 'host') {
-            setShuffledOptions(prev => [...prev].sort(() => Math.random() - 0.5));
-          } else if (target.connection && target.connection.open) {
-            target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-          }
-        } else if (powerUp.type === 'ANSWER_LOCK') {
-          setPlayers(prev => prev.map(p => p.id === targetId ? { 
-            ...p, 
-            hasAnswered: true,
-            currentAnswer: p.currentAnswer || 'LOCKED_NO_ANSWER' 
-          } : p));
-          const msg = `Your answer was locked by the Host!`;
-          if (target.connection && target.connection.open) {
-            target.connection.send({ type: 'CHAT_MESSAGE', message: { senderId: 'system', senderName: 'System', text: msg, timestamp: Date.now() }});
-          }
-        } else if (targetId === 'host') {
-          setPlayers(prev => prev.map(p => p.id === 'host' ? { 
-            ...p, 
-            activeEffects: [...p.activeEffects, { type: powerUp.type, questionIndex: currentQuestionIndexRef.current }] 
-          } : p));
-        } else if (target.connection && target.connection.open) {
-          target.connection.send({ type: 'APPLY_EFFECT', effect: powerUp.type, questionIndex: currentQuestionIndexRef.current });
-        }
-      }
-    }
-    setShowTargetList(null);
-  };
-
-  const useScissors = (powerUpId: string) => {
-    const host = players.find(p => p.id === 'host');
-    if (!host) return;
-    const powerUp = host.powerUps.find(pu => pu.id === powerUpId && pu.type === 'SCISSORS');
-    if (!powerUp) return;
-
-    setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: p.powerUps.filter(pu => pu.id !== powerUpId) } : p));
-    setScissorsUsed(true);
-  };
-
-  const openLuckyBlock = () => {
-    if (pendingPowerUp) {
-      setPlayers(prev => prev.map(p => p.id === 'host' ? { ...p, powerUps: [...p.powerUps, pendingPowerUp] } : p));
-      setPendingPowerUp(null);
-      setShowLuckyBlock(false);
-    }
   };
 
   const copyAIPrompt = () => {
@@ -1317,17 +865,58 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-4">
                     <div>
-                      <label className="block text-sm text-zinc-400 mb-2">Time Limit (sec)</label>
-                      <input 
-                        type="number" 
-                        value={settings.timePerQuestion}
-                        onChange={e => setSettings({ ...settings, timePerQuestion: parseInt(e.target.value) || 20 })}
-                        className="w-full bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
-                      />
+                      <label className="block text-sm text-zinc-400 mb-2">Time Mode</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          onClick={() => setSettings({ ...settings, timeMode: 'PER_QUESTION' })}
+                          className={clsx(
+                            "py-2 px-4 rounded-xl text-sm font-medium transition-colors border",
+                            settings.timeMode === 'PER_QUESTION' 
+                              ? "bg-indigo-600 border-indigo-500 text-white" 
+                              : "bg-zinc-800 border-white/10 text-zinc-400 hover:bg-zinc-700"
+                          )}
+                        >
+                          Per Question
+                        </button>
+                        <button
+                          onClick={() => setSettings({ ...settings, timeMode: 'TOTAL_EXAM' })}
+                          className={clsx(
+                            "py-2 px-4 rounded-xl text-sm font-medium transition-colors border",
+                            settings.timeMode === 'TOTAL_EXAM' 
+                              ? "bg-indigo-600 border-indigo-500 text-white" 
+                              : "bg-zinc-800 border-white/10 text-zinc-400 hover:bg-zinc-700"
+                          )}
+                        >
+                          Total Exam Time
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex flex-col justify-end">
+
+                    <div className="grid grid-cols-2 gap-4">
+                      {settings.timeMode === 'PER_QUESTION' ? (
+                        <div>
+                          <label className="block text-sm text-zinc-400 mb-2">Time Per Question (sec)</label>
+                          <input 
+                            type="number" 
+                            value={settings.timePerQuestion}
+                            onChange={e => setSettings({ ...settings, timePerQuestion: parseInt(e.target.value) || 20 })}
+                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                          />
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-sm text-zinc-400 mb-2">Total Exam Time (sec)</label>
+                          <input 
+                            type="number" 
+                            value={settings.totalExamTime}
+                            onChange={e => setSettings({ ...settings, totalExamTime: parseInt(e.target.value) || 600 })}
+                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                          />
+                        </div>
+                      )}
+                      <div className="flex flex-col justify-end">
                       <label className="flex items-center gap-3 cursor-pointer group">
                         <div className="relative">
                           <input 
@@ -1348,6 +937,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                         <span className="text-sm text-zinc-300 group-hover:text-white transition-colors">Shuffle Questions</span>
                       </label>
                     </div>
+                  </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
@@ -1415,114 +1005,6 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                   </div>
 
                   <div className="grid grid-cols-2 gap-4 pt-2 border-t border-white/5">
-                    <label className="flex items-center gap-3 cursor-pointer group">
-                      <div className="relative">
-                        <input 
-                          type="checkbox" 
-                          className="sr-only" 
-                          checked={settings.chaosMode}
-                          onChange={e => setSettings({ ...settings, chaosMode: e.target.checked })}
-                        />
-                        <div className={clsx(
-                          "w-10 h-6 rounded-full transition-colors",
-                          settings.chaosMode ? "bg-orange-600" : "bg-zinc-800"
-                        )}></div>
-                        <div className={clsx(
-                          "absolute left-1 top-1 w-4 h-4 bg-white rounded-full transition-transform",
-                          settings.chaosMode ? "translate-x-4" : "translate-x-0"
-                        )}></div>
-                      </div>
-                      <span className="text-sm font-bold text-orange-400 group-hover:text-orange-300 transition-colors uppercase tracking-tighter flex items-center gap-1">
-                        <Flame className="w-3 h-3" /> Chaos Mode
-                      </span>
-                    </label>
-
-                    {settings.chaosMode && (
-                      <div className="col-span-2 mt-4 space-y-4 pt-4 border-t border-white/10">
-                        <div>
-                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Chaos Intensity</label>
-                          <select 
-                            value={settings.chaosIntensity}
-                            onChange={e => setSettings({ ...settings, chaosIntensity: e.target.value as 'MILD' | 'WILD' | 'INSANE' })}
-                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="MILD">Mild</option>
-                            <option value="WILD">Wild</option>
-                            <option value="INSANE">Insane</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Power-up Frequency</label>
-                          <select 
-                            value={settings.powerUpFrequency}
-                            onChange={e => setSettings({ ...settings, powerUpFrequency: e.target.value as 'RARE' | 'NORMAL' | 'FREQUENT' })}
-                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                          >
-                            <option value="RARE">Rare</option>
-                            <option value="NORMAL">Normal</option>
-                            <option value="FREQUENT">Frequent</option>
-                          </select>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <label className="text-sm font-medium">Allow Stacking Powers</label>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input 
-                              type="checkbox" 
-                              checked={settings.allowStacking}
-                              onChange={e => setSettings({ ...settings, allowStacking: e.target.checked })}
-                              className="sr-only peer"
-                            />
-                            <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
-                          </label>
-                        </div>
-                        <div>
-                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Max Active Powers</label>
-                          <input 
-                            type="number"
-                            min="1"
-                            max="5"
-                            value={settings.maxActivePowers}
-                            onChange={e => setSettings({ ...settings, maxActivePowers: parseInt(e.target.value) || 3 })}
-                            className="w-full bg-zinc-950 border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Chaos Duration Multiplier ({settings.chaosDurationMultiplier}x)</label>
-                          <input 
-                            type="range"
-                            min="0.5"
-                            max="2"
-                            step="0.1"
-                            value={settings.chaosDurationMultiplier}
-                            onChange={e => setSettings({ ...settings, chaosDurationMultiplier: parseFloat(e.target.value) || 1 })}
-                            className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-600"
-                          />
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <label className="text-sm font-medium">Auto-balance Teams</label>
-                          <label className="relative inline-flex items-center cursor-pointer">
-                            <input 
-                              type="checkbox" 
-                              checked={settings.autoBalance}
-                              onChange={e => setSettings({ ...settings, autoBalance: e.target.checked })}
-                              className="sr-only peer"
-                            />
-                            <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600"></div>
-                          </label>
-                        </div>
-                        <div className="pt-4 border-t border-white/10">
-                          <label className="block text-sm font-medium mb-3">Power Catalog</label>
-                          <PowerCatalog 
-                            configs={settings.powerUpConfigs} 
-                            onUpdate={(id, config) => setSettings({
-                              ...settings,
-                              powerUpConfigs: { ...settings.powerUpConfigs, [id]: config }
-                            })}
-                          />
-                        </div>
-                      </div>
-                    )}
-
                     <div>
                       <label className="block text-xs text-zinc-500 mb-1 uppercase tracking-wider">Point Multiplier</label>
                       <select 
@@ -1709,92 +1191,6 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
 
         {gameState === 'QUESTION' && questions[currentQuestionIndex] && (
           <div className="w-full max-w-6xl flex flex-col items-center relative">
-            {settings.chaosMode && (
-              <div className="absolute -top-12 left-1/2 -translate-x-1/2 z-20">
-                <motion.div 
-                  animate={{ scale: [1, 1.1, 1] }}
-                  transition={{ repeat: Infinity, duration: 2 }}
-                  className="bg-orange-600/20 border border-orange-500/50 text-orange-400 px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-[0.3em] flex items-center gap-2 shadow-[0_0_15px_rgba(234,88,12,0.3)] whitespace-nowrap"
-                >
-                  <Flame className="w-3 h-3" /> Chaos Mode Active <Flame className="w-3 h-3" />
-                </motion.div>
-              </div>
-            )}
-            {/* Power-ups UI for Host */}
-            {players.find(p => p.id === 'host') && (
-              <div className="fixed bottom-24 right-6 z-50 flex flex-col items-end gap-3">
-                <AnimatePresence>
-                  {showLuckyBlock && (
-                    <motion.button
-                      initial={{ scale: 0, rotate: -180 }}
-                      animate={{ scale: 1, rotate: 0 }}
-                      exit={{ scale: 0, rotate: 180 }}
-                      onClick={openLuckyBlock}
-                      className="w-16 h-16 bg-yellow-500 rounded-2xl flex items-center justify-center shadow-[0_0_20px_rgba(234,179,8,0.5)] border-4 border-yellow-400 animate-bounce"
-                    >
-                      <Box className="w-8 h-8 text-white" />
-                    </motion.button>
-                  )}
-
-                  {players.find(p => p.id === 'host')?.powerUps.map((pu) => (
-                    <div key={pu.id} className="relative group">
-                      <motion.button
-                        initial={{ x: 50, opacity: 0 }}
-                        animate={{ x: 0, opacity: 1 }}
-                        className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg border-2 transition-all hover:scale-110"
-                        style={{ 
-                          backgroundColor: 
-                            pu.type === 'LIGHTNING' ? '#eab308' : 
-                            pu.type === 'FIREBALL' ? '#ef4444' : 
-                            pu.type === 'DOUBLE_POINTS' ? '#a855f7' : 
-                            pu.type === 'INVERT' ? '#ffffff' :
-                            pu.type === 'METEOR' ? '#f87171' : '#f97316',
-                          borderColor: 'rgba(255,255,255,0.2)'
-                        }}
-                        onClick={() => {
-                          if (['DOUBLE_POINTS'].includes(pu.type)) {
-                            usePowerUp(pu.id, 'host');
-                          } else {
-                            setShowTargetList(showTargetList === pu.id ? null : pu.id);
-                          }
-                        }}
-                      >
-                        {pu.type === 'LIGHTNING' && <Zap className="w-7 h-7 text-white" />}
-                        {pu.type === 'FIREBALL' && <Flame className="w-7 h-7 text-white" />}
-                        {pu.type === 'DOUBLE_POINTS' && <TrendingUp className="w-7 h-7 text-white" />}
-                        {pu.type === 'INVERT' && <Contrast className="w-7 h-7 text-black" />}
-                        {pu.type === 'METEOR' && <CloudLightning className="w-7 h-7 text-white" />}
-                      </motion.button>
-
-                      {showTargetList === pu.id && (
-                        <motion.div 
-                          initial={{ opacity: 0, scale: 0.9, x: -10 }}
-                          animate={{ opacity: 1, scale: 1, x: 0 }}
-                          className="absolute right-16 bottom-0 bg-zinc-900 border border-white/10 rounded-xl p-2 shadow-2xl min-w-[150px]"
-                        >
-                          <div className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
-                            <Target className="w-3 h-3" /> Use on:
-                          </div>
-                          <div className="space-y-1">
-                            {players.map(p => (
-                              <button
-                                key={p.id}
-                                onClick={() => usePowerUp(pu.id, p.id)}
-                                className="w-full text-left px-3 py-1.5 rounded-lg text-sm hover:bg-white/5 transition-colors flex items-center justify-between group"
-                              >
-                                <span className="truncate">{p.name}</span>
-                                {p.id === 'host' && <span className="text-[8px] opacity-50 ml-1">You</span>}
-                              </button>
-                            ))}
-                          </div>
-                        </motion.div>
-                      )}
-                    </div>
-                  ))}
-                </AnimatePresence>
-              </div>
-            )}
-
             <div className="w-full flex items-center justify-between mb-8">
               <span className="inline-block px-5 py-2 rounded-full bg-white/10 text-white/70 font-medium tracking-widest uppercase">
                 Question {currentQuestionIndex + 1} of {questions.length}
@@ -1804,81 +1200,10 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                 timeLeft <= 5 ? "border-red-500 text-red-500 bg-red-500/10 animate-pulse" : "border-indigo-500 text-indigo-400 bg-indigo-500/10"
               )}>
                 {timeLeft}
-                {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndex) && (
-                  <motion.div 
-                    initial={{ scale: 0 }}
-                    animate={{ scale: 1 }}
-                    className="absolute -top-2 -right-2 bg-purple-600 text-white text-[10px] font-bold px-2 py-1 rounded-full shadow-lg flex items-center gap-1"
-                  >
-                    <TrendingUp className="w-3 h-3" /> 2X
-                  </motion.div>
-                )}
               </div>
             </div>
 
             <div className="w-full bg-zinc-900 border border-white/10 rounded-[3rem] p-10 md:p-16 shadow-2xl mb-8 relative overflow-hidden">
-              {/* Lightning Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'LIGHTNING' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 bg-zinc-950 z-10 flex flex-col items-center justify-center text-yellow-400 animate-pulse">
-                  <Zap className="w-20 h-20 mb-4" />
-                  <h3 className="text-2xl font-bold uppercase tracking-widest">Blinded by Lightning!</h3>
-                </div>
-              )}
-
-              {/* Freeze Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FREEZE' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 bg-cyan-500/10 z-10 pointer-events-none border-4 border-cyan-400/30 rounded-[3rem] backdrop-blur-[1px]">
-                  <div className="absolute top-4 right-4 text-cyan-400 animate-pulse">
-                    <Snowflake className="w-10 h-10" />
-                  </div>
-                </div>
-              )}
-
-              {/* Shield Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'SHIELD' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-10 pointer-events-none border-4 border-blue-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(59,130,246,0.2)]">
-                  <div className="absolute top-4 left-4 text-blue-400">
-                    <Shield className="w-8 h-8" />
-                  </div>
-                </div>
-              )}
-
-              {/* Revenge Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'REVENGE' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-10 pointer-events-none border-4 border-pink-500/50 rounded-[3rem] shadow-[inset_0_0_50px_rgba(236,72,153,0.2)]">
-                  <div className="absolute bottom-4 right-4 text-pink-400 animate-spin-slow">
-                    <RefreshCw className="w-10 h-10" />
-                  </div>
-                </div>
-              )}
-
-              {/* Magnet Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'MAGNET' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-10 pointer-events-none">
-                  <div className="absolute top-4 right-16 text-slate-400 animate-bounce">
-                    <Magnet className="w-8 h-8" />
-                  </div>
-                </div>
-              )}
-
-              {/* Clue Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'CLUE' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-10 pointer-events-none bg-lime-500/5">
-                  <div className="absolute bottom-4 left-4 text-lime-400">
-                    <Lightbulb className="w-8 h-8" />
-                  </div>
-                </div>
-              )}
-
-              {/* Bomb Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'BOMB' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-10 pointer-events-none bg-red-900/10 rounded-[3rem]">
-                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-ping">
-                    <Bomb className="w-32 h-32" />
-                  </div>
-                </div>
-              )}
-
               <div className="absolute top-0 left-0 w-full h-2 bg-white/5">
                 <motion.div 
                   className="h-full bg-indigo-500"
@@ -1906,29 +1231,7 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
             )}
 
             <div className="w-full grid md:grid-cols-2 gap-6 mb-12 relative">
-              {/* Fireball Effect */}
-              {players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'FIREBALL' && e.questionIndex === currentQuestionIndex) && (
-                <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden rounded-3xl">
-                  <div className="absolute inset-0 bg-orange-600/20 mix-blend-overlay" />
-                  {[...Array(10)].map((_, i) => (
-                    <motion.div
-                      key={i}
-                      initial={{ y: 500, opacity: 0 }}
-                      animate={{ y: -500, opacity: [0, 1, 0] }}
-                      transition={{ duration: 2, repeat: Infinity, delay: i * 0.2 }}
-                      className="absolute bottom-0 text-orange-500"
-                      style={{ left: `${i * 10}%` }}
-                    >
-                      <Flame className="w-20 h-20" />
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-
-              {(players.find(p => p.id === 'host')?.activeEffects.some(e => e.type === 'TORNADO' && e.questionIndex === currentQuestionIndex) 
-                ? shuffledOptions 
-                : questions[currentQuestionIndex].options
-              ).map((opt, i) => {
+              {questions[currentQuestionIndex].options.map((opt, i) => {
                 const q = questions[currentQuestionIndex];
                 const isCorrect = showAnswer && opt === q.correctAnswer;
                 
@@ -1936,13 +1239,6 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                 const isHostPlayer = !!hostPlayer;
                 const hostHasAnswered = hostPlayer?.hasAnswered;
                 const isHostSelected = hostPlayer?.currentAnswer === opt;
-
-                // Scissors effect: hide 2 wrong answers
-                const isWrong = opt !== q.correctAnswer;
-                const wrongOptions = q.options.filter(o => o !== q.correctAnswer);
-                const hiddenByScissors = scissorsUsed && isWrong && wrongOptions.indexOf(opt) < 2;
-
-                if (hiddenByScissors && !showAnswer) return <div key={i} className="min-h-[140px]" />;
                 
                 const labels = ['A', 'B', 'C', 'D'];
                 const colors = [
@@ -1969,27 +1265,14 @@ Please generate [NUMBER_OF_QUESTIONS] questions about [TOPIC].`;
                   questionStatsRef.current[q.id][opt] = (questionStatsRef.current[q.id][opt] || 0) + 1;
 
                   const isCorrect = opt === q.correctAnswer;
-                  const hasDoublePoints = hostPlayer?.activeEffects.some(e => e.type === 'DOUBLE_POINTS' && e.questionIndex === currentQuestionIndexRef.current);
-                  let points = isCorrect ? Math.round(1000 * (timeLeftRef.current / q.timeLimit)) : 0;
-                  if (isCorrect && hasDoublePoints) {
-                    points *= 2;
-                  }
+                  const maxPoints = 1000 * settingsRef.current.pointMultiplier;
+                  const minPoints = maxPoints / 2;
+                  let points = isCorrect ? Math.round(minPoints + (minPoints * (timeLeftRef.current / q.timeLimit))) : -settingsRef.current.penaltyPoints;
                   setHostLastPoints(points);
 
                   setPlayers(prev => prev.map(p => {
                     if (p.id === 'host') {
-                      // Chance for lucky block for host
-                      if (isCorrect && settingsRef.current.examType === 'NORMAL' && Math.random() < 0.3) {
-                        const powerUpTypes: PowerUpType[] = ['LIGHTNING', 'FIREBALL', 'DOUBLE_POINTS', 'INVERT', 'METEOR'];
-                        const type = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
-                        const powerUp: PowerUp = { id: Math.random().toString(36).substr(2, 9), type };
-                        setPendingPowerUp(powerUp);
-                        setShowLuckyBlock(true);
-                      }
-                      const newActiveEffects = isCorrect && hasDoublePoints 
-                        ? p.activeEffects.filter(e => e.type !== 'DOUBLE_POINTS')
-                        : p.activeEffects;
-                      return { ...p, hasAnswered: true, currentAnswer: opt, score: p.score + points, activeEffects: newActiveEffects };
+                      return { ...p, hasAnswered: true, currentAnswer: opt, score: p.score + points };
                     }
                     return p;
                   }));

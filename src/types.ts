@@ -1,12 +1,9 @@
 export type ExamType = 'NORMAL' | 'QUICK';
 
-export type PowerUpConfig = {
-  enabled: boolean;
-  cooldown: number;
-};
-
 export type GameSettings = {
+  timeMode: 'PER_QUESTION' | 'TOTAL_EXAM';
   timePerQuestion: number;
+  totalExamTime: number;
   examType: ExamType;
   shuffleQuestions: boolean;
   shuffleOptions: boolean;
@@ -14,15 +11,6 @@ export type GameSettings = {
   canSkipQuestions: boolean;
   pointMultiplier: number;
   penaltyPoints: number;
-  chaosMode: boolean;
-  chaosIntensity?: 'MILD' | 'WILD' | 'INSANE';
-  powerUpFrequency?: 'RARE' | 'NORMAL' | 'FREQUENT';
-  allowStacking?: boolean;
-  maxActivePowers?: number;
-  chaosDurationMultiplier?: number;
-  enableFriendlyFire?: boolean;
-  autoBalance?: boolean;
-  powerUpConfigs: Record<string, PowerUpConfig>;
 };
 
 export type Question = {
@@ -34,19 +22,6 @@ export type Question = {
   explanation?: string;
 };
 
-export type PowerUpType = 
-  | 'LIGHTNING' | 'FIREBALL' | 'DOUBLE_POINTS' | 'INVERT' | 'METEOR';
-
-export type PowerUp = {
-  id: string;
-  type: PowerUpType;
-};
-
-export type ActiveEffect = {
-  type: PowerUpType;
-  questionIndex: number;
-};
-
 export type Player = {
   id: string;
   name: string;
@@ -55,8 +30,6 @@ export type Player = {
   currentAnswer: string | null;
   connection: any; // DataConnection
   timeTaken?: number; // For QUICK mode
-  powerUps: PowerUp[];
-  activeEffects: ActiveEffect[];
   correctCount: number;
   isReady?: boolean;
 };
@@ -80,8 +53,5 @@ export type MessageType =
   | { type: 'ANSWER_RESULT'; correct: boolean; score: number; correctAnswer: string; explanation?: string }
   | { type: 'PLAYER_LIST'; players: { id: string; name: string; score: number; timeTaken?: number; isReady?: boolean }[]; answerCounts?: Record<string, number>; correctAnswer?: string }
   | { type: 'CHAT_MESSAGE'; message: ChatMessage }
-  | { type: 'GIVE_POWER_UP'; powerUp: PowerUp }
-  | { type: 'USE_POWER_UP'; powerUpId: string; targetId: string }
-  | { type: 'APPLY_EFFECT'; effect: PowerUpType; questionIndex: number }
   | { type: 'NEW_ROUND' }
   | { type: 'PLAYER_READY'; ready: boolean };
